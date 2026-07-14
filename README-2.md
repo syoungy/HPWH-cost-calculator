@@ -68,3 +68,4 @@ to give it a display name.
   (not `in.water_heater_fuel`, which only contains fuel names).
 - HPWH sample size in MI_upgrade0 (baseline) is small (26 homes); consumption
   defaults can be overridden in the app sidebar.
+- (Michigan, DTE)‘Overnight savers’: to see the cost burden on houses that uses this tariff so that they can charge their EVs at night.(= a house has both HPWH and EVs)  
