@@ -1,8 +1,7 @@
 """
-HPWH vs Gas Water Heater - Monthly Cost Calculator (DTE, Michigan)
+HPWH vs Gas Water Heater - Monthly Cost Calculator (v1. - Michigan, DTE)
 
-Formulas
---------
+-------- Formulas --------
 HPWH:    Cost_{p,m} = 30 * E     * sum_h( f_h * r_{p,m,h} )
 Gas WH:  Cost_g     = 30 * E_gas * r_g          (flat rate; sum_h f_h = 1)
 
@@ -53,7 +52,7 @@ except Exception as e:
     st.error(f"Failed to load data files in ./data — {e}")
     st.stop()
 
-# ------------------------------------------------------------- inputs -------
+# inputs -------
 with st.sidebar:
     st.header("Inputs")
 
@@ -93,13 +92,13 @@ with st.sidebar:
     r_g = st.number_input("Gas rate r_g ($/kWh)", 0.0, 1.0, float(r_g_default), 0.001,
                           format="%.6f")
 
-# ------------------------------------------------------------- compute ------
+# compute ------
 hourly_rates = get_hourly_rates(rates, tariff, year, month)
 cost_hpwh = 30.0 * E_hpwh * sum(f * r for f, r in zip(USAGE_FRACTIONS, hourly_rates))
 cost_gas = 30.0 * E_gas * r_g
 savings = cost_gas - cost_hpwh
 
-# ------------------------------------------------------------- results ------
+# results ------
 c1, c2, c3 = st.columns(3)
 c1.metric("HPWH monthly cost", f"${cost_hpwh:,.2f}")
 c2.metric("Gas WH monthly cost", f"${cost_gas:,.2f}")
