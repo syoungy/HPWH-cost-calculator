@@ -98,7 +98,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("HPWH vs Gas Water Heater — Household Monthly Cost (v3.4)")
+st.title("HPWH vs Gas Water Heater — Household Monthly Cost (v3.5.1)")
 st.caption(
     "Each household is calculated separately using its mapped utility "
     "provider and every complete applicable electricity tariff."
@@ -161,6 +161,89 @@ def add_house_number(frame: pd.DataFrame) -> pd.DataFrame:
         ["House No.", "bldg_id"],
         kind="stable",
     ).reset_index(drop=True)
+
+
+def household_option_label(row: pd.Series) -> str:
+    return (
+        f"House {int(row['House No.']):03d} — "
+        f"bldg_id {row['bldg_id']} — {row['county']}"
+    )
+
+
+def build_household_usage_chart(
+    chart_data: pd.DataFrame,
+    bar_field: str,
+    line_field: str,
+    line_title: str,
+    y_title: str,
+) -> dict:
+    return {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "layer": [
+            {
+                "mark": {
+                    "type": "bar",
+                    "color": "#F28C28",
+                    "opacity": 0.75,
+                    "cornerRadiusTopLeft": 3,
+                    "cornerRadiusTopRight": 3,
+                },
+                "encoding": {
+                    "x": {
+                        "field": "Hour",
+                        "type": "ordinal",
+                        "sort": None,
+                        "axis": {"title": "Hour", "labelAngle": -45},
+                    },
+                    "y": {
+                        "field": bar_field,
+                        "type": "quantitative",
+                        "axis": {"title": y_title},
+                    },
+                    "tooltip": [
+                        {"field": "Hour", "type": "ordinal"},
+                        {
+                            "field": bar_field,
+                            "type": "quantitative",
+                            "title": "149-house average",
+                            "format": ".6f",
+                        },
+                    ],
+                },
+            },
+            {
+                "mark": {
+                    "type": "line",
+                    "color": "#1f77b4",
+                    "point": True,
+                    "strokeWidth": 3,
+                },
+                "encoding": {
+                    "x": {
+                        "field": "Hour",
+                        "type": "ordinal",
+                        "sort": None,
+                        "axis": {"title": "Hour", "labelAngle": -45},
+                    },
+                    "y": {
+                        "field": line_field,
+                        "type": "quantitative",
+                        "axis": {"title": y_title},
+                    },
+                    "tooltip": [
+                        {"field": "Hour", "type": "ordinal"},
+                        {
+                            "field": line_field,
+                            "type": "quantitative",
+                            "title": line_title,
+                            "format": ".6f",
+                        },
+                    ],
+                },
+            },
+        ],
+        "height": 340,
+    }
 
 st.subheader(f"Results — {profile_label}")
 card_1, card_2, card_3 = st.columns(3)
@@ -477,22 +560,137 @@ with tab_1:
             "The table is built from the provider map first, so all mapped "
             "households remain visible even if a rate is missing."
         )
-        st.dataframe(
-            display.style.format({
-                "electric_min": "${:,.2f}",
-                "electric_max": "${:,.2f}",
-                "electric_average": "${:,.2f}",
-                "gas_monthly_cost": "${:,.2f}",
-                "difference_min": "${:,.2f}",
-                "difference_max": "${:,.2f}",
-                "difference_average": "${:,.2f}",
-            }, na_rep="N/A"),
+        st.caption(
+            "Click any cell in a household row—including its bldg_id—to "
+            "update the charts directly below."
+        )
+        household_table_event = st.dataframe(
+            display,
+            column_config={
+                "electric_min": st.column_config.NumberColumn(
+                    "electric_min", format="$%.2f"
+                ),
+                "electric_max": st.column_config.NumberColumn(
+                    "electric_max", format="$%.2f"
+                ),
+                "electric_average": st.column_config.NumberColumn(
+                    "electric_average", format="$%.2f"
+                ),
+                "gas_monthly_cost": st.column_config.NumberColumn(
+                    "gas_monthly_cost", format="$%.2f"
+                ),
+                "difference_min": st.column_config.NumberColumn(
+                    "difference_min", format="$%.2f"
+                ),
+                "difference_max": st.column_config.NumberColumn(
+                    "difference_max", format="$%.2f"
+                ),
+                "difference_average": st.column_config.NumberColumn(
+                    "difference_average", format="$%.2f"
+                ),
+            },
             use_container_width=True,
             hide_index=True,
             height=650,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="all_households_table",
         )
     else:
         st.info("No mapped households are available.")
+        st.stop()
+
+    selected_rows = household_table_event.selection.rows
+    selected_row_index = int(selected_rows[0]) if selected_rows else 0
+    selected_row = display.iloc[selected_row_index]
+    selected_bldg_id = str(selected_row["bldg_id"])
+    selected_house_no = int(selected_row["House No."])
+
+    st.markdown("### Selected household hourly energy use")
+    st.caption(
+        "The selected household is the blue line. The orange bars show the "
+        "149-house average for the same hour and selected period."
+    )
+
+    selected_electric_usage = (
+        data.electricity_usage[
+            (data.electricity_usage["bldg_id"].astype(str) == selected_bldg_id)
+            & (data.electricity_usage["season"].astype(str) == str(period))
+        ][USAGE_HOUR_COLUMNS]
+        .iloc[0]
+        .astype(float)
+        .to_numpy()
+    )
+    selected_gas_usage = (
+        data.gas_usage[
+            (data.gas_usage["bldg_id"].astype(str) == selected_bldg_id)
+            & (data.gas_usage["season"].astype(str) == str(period))
+        ][USAGE_HOUR_COLUMNS]
+        .iloc[0]
+        .astype(float)
+        .to_numpy()
+    )
+
+    selected_usage_chart = pd.DataFrame({
+        "Hour": [f"{hour:02d}:00" for hour in range(24)],
+        "Average HPWH electricity use (kWh)": average_hpwh_usage,
+        "Selected HPWH electricity use (kWh)": selected_electric_usage,
+        "Average gas-WH energy use (kWh)": average_gas_usage,
+        "Selected gas-WH energy use (kWh)": selected_gas_usage,
+    })
+
+    st.markdown(
+        f"**Selected household:** House **{selected_house_no}** · "
+        f"bldg_id **{selected_bldg_id}**"
+    )
+
+    info_cols = st.columns(4)
+    house_row = display[display["bldg_id"].astype(str) == selected_bldg_id].iloc[0]
+    info_cols[0].metric("County", str(house_row["county"]))
+    info_cols[1].metric("Electric provider", str(house_row["electric_provider"]))
+    info_cols[2].metric("Gas provider", str(house_row["gas_provider"]))
+    info_cols[3].metric("Selected profile", profile_label)
+
+    sel_col_1, sel_col_2 = st.columns(2)
+    with sel_col_1:
+        st.markdown("**HPWH electricity use: selected household vs average**")
+        st.vega_lite_chart(
+            selected_usage_chart,
+            build_household_usage_chart(
+                selected_usage_chart,
+                "Average HPWH electricity use (kWh)",
+                "Selected HPWH electricity use (kWh)",
+                "Selected household",
+                "Electric use (kWh/hour)",
+            ),
+            use_container_width=True,
+        )
+
+    with sel_col_2:
+        st.markdown("**Gas-water-heater use: selected household vs average**")
+        st.vega_lite_chart(
+            selected_usage_chart,
+            build_household_usage_chart(
+                selected_usage_chart,
+                "Average gas-WH energy use (kWh)",
+                "Selected gas-WH energy use (kWh)",
+                "Selected household",
+                "Gas use (kWh/hour)",
+            ),
+            use_container_width=True,
+        )
+
+    with st.expander("Show selected-household hourly usage table"):
+        st.dataframe(
+            selected_usage_chart.style.format({
+                "Average HPWH electricity use (kWh)": "{:.6f}",
+                "Selected HPWH electricity use (kWh)": "{:.6f}",
+                "Average gas-WH energy use (kWh)": "{:.6f}",
+                "Selected gas-WH energy use (kWh)": "{:.6f}",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 with tab_2:
     display = add_house_number(result.electric_tariff_costs)
@@ -805,4 +1003,3 @@ st.dataframe(
     use_container_width=True,
     hide_index=True,
 )
-
