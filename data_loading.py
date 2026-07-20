@@ -1,145 +1,413 @@
-"""
-Data loading for the HPWH vs Gas WH cost calculator.
+from __future__ import annotations
 
-Reads the actual project data files in ./data:
-
-  1. electricity_rates_weekdays_202607.xlsx
-       sheet 'TOU', columns: state, tariff, year, month, h0..h23  ($/kWh)
-       - first row is a comment/legend row -> dropped
-       - state/tariff/year use merged cells -> forward-filled
-       - tariffs: TOU (Time of Day 3-7pm), TOD (Time of Day 11am-7pm),
-                  OS (Overnight Savers), each x 12 months
-
-  2. gas_rates_weekdays_converted_to_kwh_202607.xlsx
-       one row, columns h0..h23 in $/kWh (flat rate, converted from $/therm)
-
-  3. MI_upgrade0_downsize.xlsx  (extracted from ResStock MI_upgrade0, 76MB -> 557KB)
-       columns: bldg_id, in.water_heater_efficiency,
-                out.electricity.hot_water.energy_consumption..kwh,
-                out.natural_gas.hot_water.energy_consumption..kwh
-       - the first column header carries a leaked tar-header string from the
-         original file; it is renamed to 'bldg_id' on load
-
-NOTE: the water-heater type filter uses 'in.water_heater_efficiency'
-(values like 'Electric Heat Pump, 50 gal, 3.45 UEF', 'Natural Gas Standard'),
-because 'in.water_heater_fuel' only contains the fuel name.
-"""
-
-import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable
 
 import pandas as pd
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
-ELEC_RATES_FILE = os.path.join(DATA_DIR, "electricity_rates_weekdays_202607.xlsx")
-GAS_RATES_FILE = os.path.join(DATA_DIR, "gas_rates_weekdays_converted_to_kwh_202607.xlsx")
-# Per-state consumption files follow the pattern: {STATE}_upgrade0_downsize.xlsx
-CONSUMPTION_PATTERN = "{state}_upgrade0_downsize.xlsx"
+DATA_DIR = Path(__file__).resolve().parent / "data"
 
-HOUR_COLS = [f"h{i}" for i in range(24)]
+ELECTRICITY_USAGE_FILE = "MI_housesample_elec_hourly_average_kwh.xlsx"
+GAS_USAGE_FILE = "MI_housesample_gas_hourly_average_kwh.xlsx"
+PROVIDER_FILE = "MI_provider_county_with_utility_providers.xlsx"
+ELECTRICITY_RATE_FILE = "electricity_rates_weekdays_202607.xlsx"
+GAS_RATE_FILE = "gas_rates_weekdays_converted_to_kwh_202607.xlsx"
 
-# Display names for the tariff codes in the rates file
+USAGE_HOUR_COLUMNS = [f"hour_{hour:02d}" for hour in range(24)]
+RATE_HOUR_COLUMNS = [f"h{hour}" for hour in range(24)]
+
 TARIFF_LABELS = {
-    "TOU": "Time of Day 3 p.m. - 7 p.m. (TOU)",
-    "TOD": "Time of Day 11 a.m. - 7 p.m. (TOD)",
-    "OS": "Overnight Savers (OS)",
+    "TOU": "Time of Use",
+    "TOD": "Time of Day",
+    "OS": "Overnight Savings",
 }
 
-# Water-heater type filters (substring match on in.water_heater_efficiency)
-WH_TYPE_COL = "in.water_heater_efficiency"
-HPWH_PATTERN = "Electric Heat Pump"
-GAS_STD_PATTERN = "Natural Gas Standard"
-
-HPWH_ENERGY_COL = "out.electricity.hot_water.energy_consumption..kwh"
-GAS_ENERGY_COL = "out.natural_gas.hot_water.energy_consumption..kwh"
-
-# ---------------------------------------------------------------------------
-# Hourly usage fraction f_h (h = 0..23), base-schedules-simple.xml,
-# 'schedule by water fixtures' (weekday == weekend). Normalized to sum to 1.
-# ---------------------------------------------------------------------------
-_RAW_FRACTIONS = [
-    0.012, 0.006, 0.004, 0.005, 0.010, 0.034, 0.078, 0.087,
-    0.080, 0.067, 0.056, 0.047, 0.040, 0.035, 0.033, 0.031,
-    0.039, 0.051, 0.060, 0.060, 0.055, 0.048, 0.038, 0.026,
-]
-_S = sum(_RAW_FRACTIONS)
-USAGE_FRACTIONS = [f / _S for f in _RAW_FRACTIONS]
+PROFILE_LABELS = {
+    "1": "January hourly average",
+    "8": "August hourly average",
+    "year": "Annual hourly average",
+}
 
 
-def load_electricity_rates() -> pd.DataFrame:
-    """Return tidy rates: columns [tariff, year, month, h0..h23] in $/kWh."""
-    df = pd.read_excel(ELEC_RATES_FILE, sheet_name=0)
-    # drop the legend row (h0 is text like '24(0)')
-    df = df[pd.to_numeric(df["h0"], errors="coerce").notna()].copy()
-    # merged cells -> forward-fill block labels
-    df[["state", "tariff", "year"]] = df[["state", "tariff", "year"]].ffill()
-    df["year"] = df["year"].astype(int)
-    df["month"] = df["month"].astype(int)
-    df[HOUR_COLS] = df[HOUR_COLS].astype(float)
-    return df[["state", "tariff", "year", "month"] + HOUR_COLS].reset_index(drop=True)
+@dataclass(frozen=True)
+class CalculatorData:
+    electricity_usage: pd.DataFrame
+    gas_usage: pd.DataFrame
+    provider_map: pd.DataFrame
+    electricity_rates: pd.DataFrame
+    gas_rates: pd.DataFrame
+    provider_mapping_warning: str | None
 
 
-def load_gas_rates() -> pd.DataFrame:
-    """Return gas rates with a 'state' column and flat $/kWh rate per state."""
-    df = pd.read_excel(GAS_RATES_FILE, sheet_name=0)
-    df = df[pd.to_numeric(df["h0"], errors="coerce").notna()].copy()
-    df["state"] = df["state"].ffill()
-    df[HOUR_COLS] = df[HOUR_COLS].astype(float)
-    return df
+def _require_file(data_dir: Path, filename: str) -> Path:
+    path = data_dir / filename
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Required file not found: {path}. "
+            "Place the five Excel files inside the repository's data/ folder."
+        )
+    return path
 
 
-def get_gas_rate(gas_rates: pd.DataFrame, state: str) -> float:
-    """Return the flat gas rate r_g in $/kWh for one state."""
-    rows = gas_rates[gas_rates.state == state]
-    if rows.empty:
-        raise ValueError(f"No gas rate for state {state}")
-    vals = rows.iloc[0][HOUR_COLS].astype(float)
-    if vals.nunique() != 1:
-        raise ValueError(f"Gas rate for {state} is expected to be flat across all 24 hours.")
-    return float(vals.iloc[0])
+def _clean_text(series: pd.Series) -> pd.Series:
+    return series.astype("string").str.strip()
 
 
-def list_available_states() -> list[str]:
-    """States that have BOTH electricity rates and a consumption file."""
-    elec_states = set(load_electricity_rates().state.unique())
-    conso_states = {
-        f.split("_")[0] for f in os.listdir(DATA_DIR)
-        if f.endswith("_upgrade0_downsize.xlsx")
-    }
-    return sorted(elec_states & conso_states)
+def _normalize_building_id(series: pd.Series) -> pd.Series:
+    # Excel sometimes reads identifiers such as 4644 as 4644.0.
+    return (
+        series.astype("string")
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
 
 
-def load_daily_consumption(state: str) -> dict:
-    """
-    Compute daily consumption from the slim ResStock extract.
+def _normalize_profile(value: object) -> str:
+    text = str(value).strip().lower()
+    if text in {"year", "annual", "annual average"}:
+        return "year"
 
-    Procedure:
-      #1 filter rows by water heater type (in.water_heater_efficiency)
-      #2 average the annual consumption column (kWh/year)
-      #3 divide by 365 -> daily consumption (kWh/day)
-    """
-    path = os.path.join(DATA_DIR, CONSUMPTION_PATTERN.format(state=state))
+    try:
+        return str(int(float(text)))
+    except (TypeError, ValueError):
+        return text
+
+
+def _validate_columns(
+    df: pd.DataFrame,
+    required: Iterable[str],
+    source_name: str,
+) -> None:
+    missing = [column for column in required if column not in df.columns]
+    if missing:
+        raise ValueError(
+            f"{source_name} is missing required columns: {missing}. "
+            f"Columns found: {list(df.columns)}"
+        )
+
+
+def load_hourly_usage(path: Path, source_name: str) -> pd.DataFrame:
+    df = pd.read_excel(path, dtype={"bldg_id": "string"})
+    df.columns = [str(column).strip() for column in df.columns]
+
+    required = ["bldg_id", "season", *USAGE_HOUR_COLUMNS]
+    _validate_columns(df, required, source_name)
+
+    df = df[required].copy()
+    df["bldg_id"] = _normalize_building_id(df["bldg_id"])
+    df["season"] = df["season"].map(_normalize_profile)
+
+    for column in USAGE_HOUR_COLUMNS:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+
+    if df[USAGE_HOUR_COLUMNS].isna().any().any():
+        bad_rows = df.index[df[USAGE_HOUR_COLUMNS].isna().any(axis=1)].tolist()[:10]
+        raise ValueError(
+            f"{source_name} contains missing or nonnumeric hourly usage values. "
+            f"Example Excel data-row indices: {bad_rows}"
+        )
+
+    duplicated = df.duplicated(["bldg_id", "season"], keep=False)
+    if duplicated.any():
+        examples = (
+            df.loc[duplicated, ["bldg_id", "season"]]
+            .drop_duplicates()
+            .head(10)
+            .to_dict("records")
+        )
+        raise ValueError(
+            f"{source_name} has duplicate bldg_id/season combinations: {examples}"
+        )
+
+    return df.reset_index(drop=True)
+
+
+def load_electricity_rates(path: Path) -> pd.DataFrame:
+    # Read every sheet so that future sheets can be added without code changes.
+    sheets = pd.read_excel(path, sheet_name=None)
+    frames: list[pd.DataFrame] = []
+
+    required = [
+        "state", "elec_provd", "tariff", "year", "month",
+        *RATE_HOUR_COLUMNS,
+    ]
+
+    for sheet_name, raw in sheets.items():
+        raw.columns = [str(column).strip() for column in raw.columns]
+        if not set(required).issubset(raw.columns):
+            continue
+
+        df = raw[required].copy()
+        df["year"] = pd.to_numeric(df["year"], errors="coerce")
+        df["month"] = pd.to_numeric(df["month"], errors="coerce")
+
+        # This removes title/annotation rows such as the row containing
+        # "24(0), 1, 2, ... 23" underneath the main header.
+        df = df[df["year"].notna() & df["month"].notna()].copy()
+
+        df["state"] = _clean_text(df["state"]).str.upper()
+        df["elec_provd"] = _clean_text(df["elec_provd"])
+        df["tariff"] = _clean_text(df["tariff"]).str.upper()
+        df["year"] = df["year"].astype(int)
+        df["month"] = df["month"].astype(int)
+
+        for column in RATE_HOUR_COLUMNS:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+
+        df = df.dropna(
+            subset=["state", "elec_provd", "tariff", *RATE_HOUR_COLUMNS]
+        )
+        df["source_sheet"] = sheet_name
+        frames.append(df)
+
+    if not frames:
+        raise ValueError(
+            "No valid electricity-rate rows were found. "
+            "The workbook must contain state, elec_provd, tariff, year, month, "
+            "and h0-h23 columns."
+        )
+
+    rates = pd.concat(frames, ignore_index=True)
+
+    duplicate_keys = ["state", "elec_provd", "tariff", "year", "month"]
+    duplicated = rates.duplicated(duplicate_keys, keep=False)
+    if duplicated.any():
+        examples = (
+            rates.loc[duplicated, duplicate_keys]
+            .drop_duplicates()
+            .head(10)
+            .to_dict("records")
+        )
+        raise ValueError(
+            "Electricity rates contain duplicate provider/tariff/year/month rows: "
+            f"{examples}"
+        )
+
+    return rates.sort_values(duplicate_keys).reset_index(drop=True)
+
+
+def load_gas_rates(path: Path) -> pd.DataFrame:
+    sheets = pd.read_excel(path, sheet_name=None)
+    frames: list[pd.DataFrame] = []
+    required = ["state", "tariff", "year", "gas_provd", *RATE_HOUR_COLUMNS]
+
+    for sheet_name, raw in sheets.items():
+        raw.columns = [str(column).strip() for column in raw.columns]
+        if not set(required).issubset(raw.columns):
+            continue
+
+        df = raw[required].copy()
+
+        # The supplied workbook uses vertically merged cells, which pandas
+        # reads as blanks below the first provider. Forward-fill only the
+        # shared grouping fields.
+        df[["state", "tariff"]] = df[["state", "tariff"]].ffill()
+        df["year"] = pd.to_numeric(df["year"], errors="coerce")
+        df = df[df["year"].notna() & df["gas_provd"].notna()].copy()
+
+        df["state"] = _clean_text(df["state"]).str.upper()
+        df["tariff"] = _clean_text(df["tariff"]).str.upper()
+        df["gas_provd"] = _clean_text(df["gas_provd"])
+        df["year"] = df["year"].astype(int)
+
+        for column in RATE_HOUR_COLUMNS:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+
+        df = df.dropna(
+            subset=["state", "gas_provd", *RATE_HOUR_COLUMNS]
+        )
+        df["source_sheet"] = sheet_name
+        frames.append(df)
+
+    if not frames:
+        raise ValueError(
+            "No valid gas-rate rows were found. "
+            "The workbook must contain state, tariff, year, gas_provd, "
+            "and h0-h23 columns."
+        )
+
+    rates = pd.concat(frames, ignore_index=True)
+    duplicate_keys = ["state", "gas_provd", "year"]
+    duplicated = rates.duplicated(duplicate_keys, keep=False)
+    if duplicated.any():
+        examples = (
+            rates.loc[duplicated, duplicate_keys]
+            .drop_duplicates()
+            .head(10)
+            .to_dict("records")
+        )
+        raise ValueError(
+            "Gas rates contain duplicate state/provider/year rows: "
+            f"{examples}"
+        )
+
+    return rates.sort_values(duplicate_keys).reset_index(drop=True)
+
+
+def load_provider_map(
+    path: Path,
+    building_ids_in_usage_order: list[str],
+) -> tuple[pd.DataFrame, str | None]:
     df = pd.read_excel(path)
-    df = df.rename(columns={df.columns[0]: "bldg_id"})  # fix leaked tar-header name
-    out = {}
-    for key, pattern, col in [
-        ("hpwh", HPWH_PATTERN, HPWH_ENERGY_COL),
-        ("gas", GAS_STD_PATTERN, GAS_ENERGY_COL),
-    ]:
-        mask = df[WH_TYPE_COL].astype(str).str.contains(pattern, case=False, na=False)
-        sub = df.loc[mask, col].dropna()
-        annual = float(sub.mean())
-        out[key] = {
-            "n_rows": int(sub.shape[0]),
-            "annual_avg_kwh": annual,
-            "daily_kwh": annual / 365.0,
-        }
-    return out
+    df.columns = [str(column).strip() for column in df.columns]
+
+    # Accept either the standardized ID name or the current source-file name.
+    id_aliases = ["bldg_id", "MI_bldg_id"]
+    id_column = next((name for name in id_aliases if name in df.columns), None)
+    if id_column is None:
+        raise ValueError(
+            f"{path.name} must contain one of these ID columns: {id_aliases}. "
+            "Provider records are not matched to buildings by row order."
+        )
+
+    if id_column != "bldg_id":
+        df = df.rename(columns={id_column: "bldg_id"})
+
+    required = ["bldg_id", "in.county_name", "elec_provd", "gas_provd"]
+    _validate_columns(df, required, path.name)
+    df = df[required].copy()
+
+    df["bldg_id"] = _normalize_building_id(df["bldg_id"])
+    df["in.county_name"] = _clean_text(df["in.county_name"])
+    df["elec_provd"] = _clean_text(df["elec_provd"])
+    df["gas_provd"] = _clean_text(df["gas_provd"])
+
+    if df[required].isna().any().any():
+        null_counts = df[required].isna().sum()
+        null_counts = null_counts[null_counts > 0].to_dict()
+        raise ValueError(
+            f"{path.name} contains blank required values: {null_counts}"
+        )
+
+    duplicated = df.duplicated("bldg_id", keep=False)
+    if duplicated.any():
+        examples = df.loc[duplicated, "bldg_id"].drop_duplicates().head(10).tolist()
+        raise ValueError(f"Provider file has duplicate bldg_id values: {examples}")
+
+    usage_ids = set(map(str, building_ids_in_usage_order))
+    provider_ids = set(df["bldg_id"])
+
+    extra_ids = sorted(provider_ids - usage_ids)
+    if extra_ids:
+        raise ValueError(
+            "The provider file contains building IDs that do not occur in the "
+            f"usage files. Examples: {extra_ids[:10]}"
+        )
+
+    missing_ids = sorted(usage_ids - provider_ids)
+    warning = None
+    if missing_ids:
+        warning = (
+            f"{len(missing_ids)} building(s) in the hourly-usage files have no "
+            "provider mapping and are excluded from the building selector: "
+            + ", ".join(missing_ids[:10])
+        )
+
+    return df.sort_values("bldg_id").reset_index(drop=True), warning
+
+def load_calculator_data(data_dir: Path = DATA_DIR) -> CalculatorData:
+    electricity_usage = load_hourly_usage(
+        _require_file(data_dir, ELECTRICITY_USAGE_FILE),
+        ELECTRICITY_USAGE_FILE,
+    )
+    gas_usage = load_hourly_usage(
+        _require_file(data_dir, GAS_USAGE_FILE),
+        GAS_USAGE_FILE,
+    )
+
+    electric_keys = set(
+        map(tuple, electricity_usage[["bldg_id", "season"]].to_numpy())
+    )
+    gas_keys = set(map(tuple, gas_usage[["bldg_id", "season"]].to_numpy()))
+    if electric_keys != gas_keys:
+        only_electric = sorted(electric_keys - gas_keys)[:10]
+        only_gas = sorted(gas_keys - electric_keys)[:10]
+        raise ValueError(
+            "Electric and gas usage files do not contain identical "
+            "bldg_id/season combinations. "
+            f"Only in electricity: {only_electric}; only in gas: {only_gas}"
+        )
+
+    building_ids = electricity_usage["bldg_id"].drop_duplicates().tolist()
+    provider_map, provider_warning = load_provider_map(
+        _require_file(data_dir, PROVIDER_FILE),
+        building_ids,
+    )
+
+    electricity_rates = load_electricity_rates(
+        _require_file(data_dir, ELECTRICITY_RATE_FILE)
+    )
+    gas_rates = load_gas_rates(
+        _require_file(data_dir, GAS_RATE_FILE)
+    )
+
+    return CalculatorData(
+        electricity_usage=electricity_usage,
+        gas_usage=gas_usage,
+        provider_map=provider_map,
+        electricity_rates=electricity_rates,
+        gas_rates=gas_rates,
+        provider_mapping_warning=provider_warning,
+    )
 
 
-def get_hourly_rates(rates: pd.DataFrame, tariff: str, year: int, month: int) -> list[float]:
-    """Return the 24-hour rate vector r_{p,m,h} in $/kWh for one tariff/year/month."""
-    row = rates[(rates.tariff == tariff) & (rates.year == year) & (rates.month == month)]
-    if row.empty:
-        raise ValueError(f"No rates for tariff={tariff}, year={year}, month={month}")
-    return row.iloc[0][HOUR_COLS].astype(float).tolist()
+def get_usage_vector(
+    usage: pd.DataFrame,
+    building_id: str,
+    profile: str,
+) -> list[float]:
+    matched = usage[
+        (usage["bldg_id"] == str(building_id))
+        & (usage["season"] == str(profile))
+    ]
+    if len(matched) != 1:
+        raise ValueError(
+            f"Expected exactly one usage row for bldg_id={building_id}, "
+            f"profile={profile}; found {len(matched)}."
+        )
+    return matched.iloc[0][USAGE_HOUR_COLUMNS].astype(float).tolist()
+
+
+def get_electricity_rate_vector(
+    rates: pd.DataFrame,
+    state: str,
+    provider: str,
+    tariff: str,
+    year: int,
+    month: int,
+) -> list[float]:
+    matched = rates[
+        (rates["state"] == state)
+        & (rates["elec_provd"] == provider)
+        & (rates["tariff"] == tariff)
+        & (rates["year"] == int(year))
+        & (rates["month"] == int(month))
+    ]
+    if len(matched) != 1:
+        raise ValueError(
+            "Expected exactly one electricity-rate row for "
+            f"{state} / {provider} / {tariff} / {year}-{month:02d}; "
+            f"found {len(matched)}."
+        )
+    return matched.iloc[0][RATE_HOUR_COLUMNS].astype(float).tolist()
+
+
+def get_gas_rate_vector(
+    rates: pd.DataFrame,
+    state: str,
+    provider: str,
+    year: int,
+) -> list[float]:
+    matched = rates[
+        (rates["state"] == state)
+        & (rates["gas_provd"] == provider)
+        & (rates["year"] == int(year))
+    ]
+    if len(matched) != 1:
+        raise ValueError(
+            "Expected exactly one gas-rate row for "
+            f"{state} / {provider} / {year}; found {len(matched)}."
+        )
+    return matched.iloc[0][RATE_HOUR_COLUMNS].astype(float).tolist()
