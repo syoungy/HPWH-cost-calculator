@@ -55,11 +55,50 @@ def show_summary_card(
         title,
         money(summary["mean"]),
     )
-    column.caption(
-        f"Interval 95%: **{money(interval_95_mean)}** "
-        f"(**{interval_95_n} households**)  \n"
-        f"Range: **{money(summary['min'])} – {money(summary['max'])}**  \n"
-        f"Households: **{summary['n']}/{denominator}**"
+
+    # Use HTML instead of Markdown emphasis so literal ** characters never
+    # appear in the Streamlit UI. All text inherits the app's normal text
+    # color rather than the theme accent color.
+    column.markdown(
+        f"""
+        <div style="
+            margin-top: 0.35rem;
+            color: inherit;
+            line-height: 1.45;
+        ">
+            <div style="
+                font-size: 1.18rem;
+                font-weight: 750;
+                color: inherit;
+                margin-bottom: 0.35rem;
+            ">
+                Interval 95%: {money(interval_95_mean)}
+                <span style="
+                    font-size: 0.96rem;
+                    font-weight: 650;
+                    color: inherit;
+                ">
+                    ({interval_95_n} households)
+                </span>
+            </div>
+            <div style="
+                font-size: 0.98rem;
+                font-weight: 500;
+                color: inherit;
+                margin-bottom: 0.2rem;
+            ">
+                Range: {money(summary["min"])} – {money(summary["max"])}
+            </div>
+            <div style="
+                font-size: 0.98rem;
+                font-weight: 500;
+                color: inherit;
+            ">
+                Households: {summary["n"]}/{denominator}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
 
@@ -105,7 +144,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("HPWH vs Gas Water Heater — Household Monthly Cost (v3.6.1)")
+st.title("HPWH vs Gas Water Heater — Household Monthly Cost (v3.6.2)")
 st.caption(
     "Each household is calculated separately using its mapped utility "
     "provider and every complete applicable electricity tariff."
