@@ -1,20 +1,18 @@
 """
-HPWH vs Gas Water Heater — Hourly Monthly Cost Calculator (v2)
+HPWH vs Gas Water Heater — Average Household Cost Calculator (v2.3)
 
-The hourly usage workbooks already contain hourly average kWh.
-Therefore the calculator does NOT apply a separate water-fixture
-usage fraction.
+The calculator uses the hour-by-hour arithmetic mean across all buildings
+that have valid provider mappings. Individual buildings are not selectable.
 
-HPWH monthly variable energy cost:
-    D(y,m) * sum_h(E_HPWH[b,s,h] * R_e[p,y,m,h])
+January:
+    31-day January cost using January mean usage and January rates.
 
-Gas-WH monthly variable energy cost:
-    D(y,m) * sum_h(E_gas[b,s,h] * R_g[g,y,h])
+August:
+    31-day August cost using August mean usage and August rates.
 
-D(y,m) is the actual number of calendar days in the selected month.
-
-Run locally:
-    streamlit run app.py
+Annual average:
+    Annual cost using the annual mean hourly usage profile and all 12 monthly
+    electricity-rate profiles, divided by 12 to report average monthly cost.
 """
 
 from __future__ import annotations
@@ -27,23 +25,17 @@ import streamlit as st
 from data_loading import (
     PROFILE_LABELS,
     TARIFF_LABELS,
+    get_average_usage_vector,
     get_electricity_rate_vector,
     get_gas_rate_vector,
-    get_usage_vector,
     load_calculator_data,
 )
 
 
-MONTH_NAMES = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-]
-
-PROFILE_OPTIONS = {
-    "auto": "Auto: January→January profile; August→August profile; otherwise annual",
-    "1": PROFILE_LABELS["1"],
-    "8": PROFILE_LABELS["8"],
-    "year": PROFILE_LABELS["year"],
+PERIOD_OPTIONS = {
+    "1": "January",
+    "8": "August",
+    "year": "Annual average",
 }
 
 
@@ -52,14 +44,39 @@ def load_all_data():
     return load_calculator_data()
 
 
-def profile_for_month(selected_option: str, month: int) -> str:
-    if selected_option != "auto":
-        return selected_option
-    if month == 1:
-        return "1"
-    if month == 8:
-        return "8"
-    return "year"
+def ordered_unique(series: pd.Series) -> list:
+    return series.dropna().drop_duplicates().tolist()
+
+
+def latest_common_year(
+    electricity_rates: pd.DataFrame,
+    gas_rates: pd.DataFrame,
+    state: str,
+    electric_provider: str,
+    tariff: str,
+    gas_provider: str,
+) -> int:
+    electric_years = set(
+        electricity_rates.loc[
+            (electricity_rates["state"] == state)
+            & (electricity_rates["elec_provd"] == electric_provider)
+            & (electricity_rates["tariff"] == tariff),
+            "year",
+        ].astype(int)
+    )
+    gas_years = set(
+        gas_rates.loc[
+            (gas_rates["state"] == state)
+            & (gas_rates["gas_provd"] == gas_provider),
+            "year",
+        ].astype(int)
+    )
+    common = sorted(electric_years & gas_years)
+    if not common:
+        raise ValueError(
+            "The selected electricity and gas providers have no common rate year."
+        )
+    return common[-1]
 
 
 st.set_page_config(
@@ -68,310 +85,326 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("HPWH vs Gas Water Heater — Monthly Cost")
+st.title("HPWH vs Gas Water Heater — Average Monthly Cost")
 st.caption(
-    "Building-level hourly ResStock consumption × utility-specific hourly rates"
+    "Mean hourly energy use across mapped homes × selected utility rates"
 )
 
 try:
     data = load_all_data()
 except Exception as exc:
-    st.error(f"Failed to load or validate the files in ./data: {exc}")
+    st.error(f"Failed to load or validate the data files: {exc}")
     st.stop()
-
-if data.provider_mapping_warning:
-    st.warning(data.provider_mapping_warning)
 
 electricity_rates = data.electricity_rates
 gas_rates = data.gas_rates
-provider_map = data.provider_map
+mapped_building_ids = data.provider_map["bldg_id"].astype(str).tolist()
+sample_size = len(mapped_building_ids)
+
+shared_states = [
+    state
+    for state in ordered_unique(electricity_rates["state"])
+    if state in set(gas_rates["state"].dropna())
+]
+if not shared_states:
+    st.error("No state is shared by the electricity and gas rate files.")
+    st.stop()
+
+# This version is designed for the Michigan dataset. When more states are added,
+# the first state in the workbook is used automatically.
+state = shared_states[0]
 
 with st.sidebar:
     st.header("Inputs")
 
-    states = sorted(
-        set(electricity_rates["state"].dropna())
-        & set(gas_rates["state"].dropna())
-    )
-    if not states:
-        st.error("No state is shared by the electricity and gas rate files.")
-        st.stop()
-
-    state = st.selectbox("State", states)
-
-    building_ids = provider_map["bldg_id"].astype(str).tolist()
-    building_id = st.selectbox("Building ID", building_ids)
-
-    provider_row = provider_map[
-        provider_map["bldg_id"].astype(str) == str(building_id)
-    ].iloc[0]
-
-    mapped_electric_provider = provider_row["elec_provd"]
-    mapped_gas_provider = provider_row["gas_provd"]
-    county = provider_row["in.county_name"]
-
-    st.caption(f"County: **{county}**")
-    st.caption(f"Mapped electric utility: **{mapped_electric_provider}**")
-    st.caption(f"Mapped gas utility: **{mapped_gas_provider}**")
-
-    available_electric_providers = sorted(
+    electric_providers = ordered_unique(
         electricity_rates.loc[
             electricity_rates["state"] == state,
             "elec_provd",
-        ].unique()
+        ]
     )
-    available_gas_providers = sorted(
-        gas_rates.loc[
-            gas_rates["state"] == state,
-            "gas_provd",
-        ].unique()
-    )
+    if not electric_providers:
+        st.error(f"No electricity providers are available for {state}.")
+        st.stop()
 
-    override = st.checkbox(
-        "Override mapped utility providers",
-        value=False,
-        help=(
-            "Useful for testing. For final building-level results, use the "
-            "providers mapped to that building."
-        ),
+    electric_provider = st.selectbox(
+        "Electricity provider",
+        electric_providers,
+        index=0,
     )
 
-    if override:
-        electric_provider = st.selectbox(
-            "Electric utility",
-            available_electric_providers,
-            index=(
-                available_electric_providers.index(mapped_electric_provider)
-                if mapped_electric_provider in available_electric_providers
-                else 0
-            ),
-        )
-        gas_provider = st.selectbox(
-            "Gas utility",
-            available_gas_providers,
-            index=(
-                available_gas_providers.index(mapped_gas_provider)
-                if mapped_gas_provider in available_gas_providers
-                else 0
-            ),
-        )
-    else:
-        electric_provider = mapped_electric_provider
-        gas_provider = mapped_gas_provider
-
-        if electric_provider not in available_electric_providers:
-            st.error(
-                f"No electricity-rate data are currently available for "
-                f"{electric_provider}. Add that provider to the electricity-rate "
-                "workbook or enable provider override for testing."
-            )
-            st.stop()
-
-        if gas_provider not in available_gas_providers:
-            st.error(
-                f"No gas-rate data are currently available for {gas_provider}. "
-                "Add that provider to the gas-rate workbook or enable provider "
-                "override for testing."
-            )
-            st.stop()
-
-    provider_electric_rates = electricity_rates[
+    provider_rate_rows = electricity_rates[
         (electricity_rates["state"] == state)
         & (electricity_rates["elec_provd"] == electric_provider)
     ]
+    tariff_codes = ordered_unique(provider_rate_rows["tariff"])
+    if not tariff_codes:
+        st.error(f"No tariffs are available for {electric_provider}.")
+        st.stop()
 
-    tariff_codes = sorted(
-        provider_electric_rates["tariff"].unique(),
-        key=lambda code: (
-            list(TARIFF_LABELS).index(code)
-            if code in TARIFF_LABELS
-            else len(TARIFF_LABELS),
-            code,
-        ),
-    )
     tariff = st.selectbox(
         "Electricity rate plan",
         tariff_codes,
+        index=0,
         format_func=lambda code: TARIFF_LABELS.get(code, code),
     )
 
-    tariff_rates = provider_electric_rates[
-        provider_electric_rates["tariff"] == tariff
-    ]
-    electric_years = set(tariff_rates["year"].astype(int))
-    gas_years = set(
+    gas_providers = ordered_unique(
         gas_rates.loc[
-            (gas_rates["state"] == state)
-            & (gas_rates["gas_provd"] == gas_provider),
-            "year",
-        ].astype(int)
+            gas_rates["state"] == state,
+            "gas_provd",
+        ]
     )
-    common_years = sorted(electric_years & gas_years)
-
-    if not common_years:
-        st.error(
-            "The selected electricity and gas providers do not have a common rate year."
-        )
+    if not gas_providers:
+        st.error(f"No gas providers are available for {state}.")
         st.stop()
 
-    year = st.selectbox(
-        "Rate year",
-        common_years,
-        index=len(common_years) - 1,
+    gas_provider = st.selectbox(
+        "Gas provider",
+        gas_providers,
+        index=0,
     )
 
-    months = sorted(
-        tariff_rates.loc[
-            tariff_rates["year"] == year,
-            "month",
-        ].astype(int).unique()
+    period = st.selectbox(
+        "Period",
+        list(PERIOD_OPTIONS),
+        index=0,
+        format_func=lambda code: PERIOD_OPTIONS[code],
     )
-    month = st.selectbox(
-        "Rate month",
-        months,
-        format_func=lambda value: f"{value:02d} — {MONTH_NAMES[value - 1]}",
-    )
-
-    profile_option = st.selectbox(
-        "Consumption profile",
-        list(PROFILE_OPTIONS),
-        format_func=lambda code: PROFILE_OPTIONS[code],
-    )
-    profile = profile_for_month(profile_option, month)
-
-days_in_month = calendar.monthrange(int(year), int(month))[1]
 
 try:
-    hpwh_usage = get_usage_vector(
+    year = latest_common_year(
+        electricity_rates=electricity_rates,
+        gas_rates=gas_rates,
+        state=state,
+        electric_provider=electric_provider,
+        tariff=tariff,
+        gas_provider=gas_provider,
+    )
+
+    hpwh_usage, hpwh_n = get_average_usage_vector(
         data.electricity_usage,
-        building_id,
-        profile,
+        mapped_building_ids,
+        period,
     )
-    gas_usage = get_usage_vector(
+    gas_usage, gas_n = get_average_usage_vector(
         data.gas_usage,
-        building_id,
-        profile,
+        mapped_building_ids,
+        period,
     )
-    electric_rate = get_electricity_rate_vector(
-        electricity_rates,
-        state,
-        electric_provider,
-        tariff,
-        int(year),
-        int(month),
-    )
+    if hpwh_n != gas_n:
+        raise ValueError(
+            f"Electric and gas averages use different sample sizes: "
+            f"{hpwh_n} vs {gas_n}."
+        )
+
     gas_rate = get_gas_rate_vector(
         gas_rates,
         state,
         gas_provider,
-        int(year),
+        year,
     )
 except Exception as exc:
     st.error(f"Could not prepare the selected calculation: {exc}")
     st.stop()
 
+if period in {"1", "8"}:
+    month = int(period)
+    days = calendar.monthrange(year, month)[1]
+
+    try:
+        electric_rate = get_electricity_rate_vector(
+            electricity_rates,
+            state,
+            electric_provider,
+            tariff,
+            year,
+            month,
+        )
+    except Exception as exc:
+        st.error(f"Could not load the selected monthly electricity rate: {exc}")
+        st.stop()
+
+    hpwh_daily_cost_by_hour = [
+        usage * rate for usage, rate in zip(hpwh_usage, electric_rate)
+    ]
+    gas_daily_cost_by_hour = [
+        usage * rate for usage, rate in zip(gas_usage, gas_rate)
+    ]
+
+    hpwh_result_cost = days * sum(hpwh_daily_cost_by_hour)
+    gas_result_cost = days * sum(gas_daily_cost_by_hour)
+    result_label = f"{PERIOD_OPTIONS[period]} monthly cost"
+    period_detail = f"{PERIOD_OPTIONS[period]} {year} · {days} calendar days"
+
+else:
+    year_rows = electricity_rates[
+        (electricity_rates["state"] == state)
+        & (electricity_rates["elec_provd"] == electric_provider)
+        & (electricity_rates["tariff"] == tariff)
+        & (electricity_rates["year"] == year)
+    ]
+    available_months = set(year_rows["month"].astype(int))
+    required_months = set(range(1, 13))
+    missing_months = sorted(required_months - available_months)
+    if missing_months:
+        st.error(
+            "Annual average requires all 12 monthly electricity-rate rows. "
+            f"Missing months: {missing_months}"
+        )
+        st.stop()
+
+    annual_days = 0
+    hpwh_annual_cost = 0.0
+    weighted_electric_rate = [0.0] * 24
+
+    for month in range(1, 13):
+        days = calendar.monthrange(year, month)[1]
+        month_rate = get_electricity_rate_vector(
+            electricity_rates,
+            state,
+            electric_provider,
+            tariff,
+            year,
+            month,
+        )
+
+        annual_days += days
+        hpwh_annual_cost += days * sum(
+            usage * rate for usage, rate in zip(hpwh_usage, month_rate)
+        )
+        weighted_electric_rate = [
+            current + days * rate
+            for current, rate in zip(weighted_electric_rate, month_rate)
+        ]
+
+    electric_rate = [
+        total / annual_days for total in weighted_electric_rate
+    ]
+    hpwh_daily_cost_by_hour = [
+        usage * rate for usage, rate in zip(hpwh_usage, electric_rate)
+    ]
+    gas_daily_cost_by_hour = [
+        usage * rate for usage, rate in zip(gas_usage, gas_rate)
+    ]
+
+    gas_annual_cost = annual_days * sum(gas_daily_cost_by_hour)
+
+    hpwh_result_cost = hpwh_annual_cost / 12
+    gas_result_cost = gas_annual_cost / 12
+    result_label = "Average monthly cost"
+    period_detail = (
+        f"Annual profile and all 12 monthly rates for {year} · "
+        f"annual total divided by 12"
+    )
+
+savings = gas_result_cost - hpwh_result_cost
+
 hourly = pd.DataFrame({
-    "hour": list(range(24)),
-    "HPWH usage (kWh/day at hour)": hpwh_usage,
+    "hour": range(24),
+    "Average HPWH use (kWh/hour)": hpwh_usage,
     "Electricity rate ($/kWh)": electric_rate,
-    "Gas WH usage (kWh/day at hour)": gas_usage,
+    "Average gas-WH use (kWh/hour)": gas_usage,
     "Gas rate ($/kWh)": gas_rate,
+    "HPWH cost ($/average day by hour)": hpwh_daily_cost_by_hour,
+    "Gas-WH cost ($/average day by hour)": gas_daily_cost_by_hour,
 })
 
-hourly["HPWH cost ($/day at hour)"] = (
-    hourly["HPWH usage (kWh/day at hour)"]
-    * hourly["Electricity rate ($/kWh)"]
-)
-hourly["Gas WH cost ($/day at hour)"] = (
-    hourly["Gas WH usage (kWh/day at hour)"]
-    * hourly["Gas rate ($/kWh)"]
-)
-
-hpwh_daily_kwh = hourly["HPWH usage (kWh/day at hour)"].sum()
-gas_daily_kwh = hourly["Gas WH usage (kWh/day at hour)"].sum()
-hpwh_daily_cost = hourly["HPWH cost ($/day at hour)"].sum()
-gas_daily_cost = hourly["Gas WH cost ($/day at hour)"].sum()
-
-hpwh_monthly_cost = days_in_month * hpwh_daily_cost
-gas_monthly_cost = days_in_month * gas_daily_cost
-savings = gas_monthly_cost - hpwh_monthly_cost
-
-st.subheader("Monthly result")
-metric_1, metric_2, metric_3, metric_4 = st.columns(4)
-metric_1.metric("HPWH variable cost", f"${hpwh_monthly_cost:,.2f}")
-metric_2.metric("Gas WH variable cost", f"${gas_monthly_cost:,.2f}")
+st.subheader(result_label)
+metric_1, metric_2, metric_3 = st.columns(3)
+metric_1.metric("HPWH", f"${hpwh_result_cost:,.2f}")
+metric_2.metric("Gas water heater", f"${gas_result_cost:,.2f}")
 metric_3.metric(
     "HPWH savings vs Gas",
     f"${savings:,.2f}",
-    delta=f"{savings:,.2f}",
 )
-metric_4.metric("Calendar days used", f"{days_in_month}")
 
 st.caption(
-    f"Building **{building_id}** · **{county}** · "
-    f"Electric: **{electric_provider} / {TARIFF_LABELS.get(tariff, tariff)}** · "
+    f"State: **{state}** · Rate year: **{year}** · "
+    f"Electricity: **{electric_provider} / "
+    f"{TARIFF_LABELS.get(tariff, tariff)}** · "
     f"Gas: **{gas_provider}** · "
-    f"Rate period: **{MONTH_NAMES[month - 1]} {year}** · "
-    f"Consumption profile: **{PROFILE_LABELS[profile]}**"
+    f"Consumption: **{PROFILE_LABELS[period]} across {sample_size} homes**"
 )
+st.caption(period_detail)
+
+if data.excluded_building_ids:
+    st.caption(
+        f"{len(data.excluded_building_ids)} usage-file homes without provider "
+        "mapping are excluded from the average."
+    )
 
 st.info(
-    "These results include variable energy charges represented in the rate "
-    "workbooks. Fixed customer charges, taxes, riders, minimum bills, and "
-    "tiered-block adjustments are not added unless they are already embedded "
-    "in the hourly $/kWh values."
+    "The displayed costs include the variable energy rates represented in the "
+    "workbooks. Separate fixed customer charges, taxes, riders, minimum bills, "
+    "or tiered adjustments are not added unless already embedded in those rates."
 )
 
 st.divider()
+
 summary_1, summary_2, summary_3, summary_4 = st.columns(4)
-summary_1.metric("HPWH daily energy", f"{hpwh_daily_kwh:,.3f} kWh")
-summary_2.metric("Gas WH daily energy", f"{gas_daily_kwh:,.3f} kWh")
-summary_3.metric("HPWH daily cost", f"${hpwh_daily_cost:,.3f}")
-summary_4.metric("Gas WH daily cost", f"${gas_daily_cost:,.3f}")
+summary_1.metric(
+    "Average HPWH energy",
+    f"{sum(hpwh_usage):,.3f} kWh/day",
+)
+summary_2.metric(
+    "Average gas-WH energy",
+    f"{sum(gas_usage):,.3f} kWh/day",
+)
+summary_3.metric(
+    "HPWH cost per average day",
+    f"${sum(hpwh_daily_cost_by_hour):,.3f}",
+)
+summary_4.metric(
+    "Gas-WH cost per average day",
+    f"${sum(gas_daily_cost_by_hour):,.3f}",
+)
 
-st.subheader("Hourly profiles")
-
-usage_chart = hourly.set_index("hour")[
-    [
-        "HPWH usage (kWh/day at hour)",
-        "Gas WH usage (kWh/day at hour)",
-    ]
-]
-rate_chart = hourly.set_index("hour")[
-    [
-        "Electricity rate ($/kWh)",
-        "Gas rate ($/kWh)",
-    ]
-]
-cost_chart = hourly.set_index("hour")[
-    [
-        "HPWH cost ($/day at hour)",
-        "Gas WH cost ($/day at hour)",
-    ]
-]
+st.subheader("Average hourly profiles")
 
 tab_1, tab_2, tab_3, tab_4 = st.tabs(
     ["Hourly usage", "Hourly rates", "Hourly cost", "Data table"]
 )
 
 with tab_1:
-    st.line_chart(usage_chart)
+    st.line_chart(
+        hourly.set_index("hour")[
+            [
+                "Average HPWH use (kWh/hour)",
+                "Average gas-WH use (kWh/hour)",
+            ]
+        ]
+    )
 
 with tab_2:
-    st.line_chart(rate_chart)
+    st.line_chart(
+        hourly.set_index("hour")[
+            [
+                "Electricity rate ($/kWh)",
+                "Gas rate ($/kWh)",
+            ]
+        ]
+    )
 
 with tab_3:
-    st.bar_chart(cost_chart)
+    st.bar_chart(
+        hourly.set_index("hour")[
+            [
+                "HPWH cost ($/average day by hour)",
+                "Gas-WH cost ($/average day by hour)",
+            ]
+        ]
+    )
 
 with tab_4:
     st.dataframe(
         hourly.style.format({
-            "HPWH usage (kWh/day at hour)": "{:.6f}",
+            "Average HPWH use (kWh/hour)": "{:.6f}",
             "Electricity rate ($/kWh)": "{:.6f}",
-            "Gas WH usage (kWh/day at hour)": "{:.6f}",
+            "Average gas-WH use (kWh/hour)": "{:.6f}",
             "Gas rate ($/kWh)": "{:.6f}",
-            "HPWH cost ($/day at hour)": "{:.6f}",
-            "Gas WH cost ($/day at hour)": "{:.6f}",
+            "HPWH cost ($/average day by hour)": "{:.6f}",
+            "Gas-WH cost ($/average day by hour)": "{:.6f}",
         }),
         use_container_width=True,
     )
@@ -379,31 +412,21 @@ with tab_4:
 st.divider()
 st.markdown(
     r"""
-### Formulas
+### Calculation
+
+For January and August, each hourly usage value is first averaged across the
+mapped homes. The monthly variable cost is:
 
 \[
-C^{HPWH}_{b,p,m,s}
+C_m
 =
-D_{y,m}
+D_m
 \sum_{h=0}^{23}
-E^{HPWH}_{b,s,h}
-R^{e}_{p,y,m,h}
+\overline{E}_{s,h} R_{m,h}
 \]
 
-\[
-C^{Gas}_{b,g,m,s}
-=
-D_{y,m}
-\sum_{h=0}^{23}
-E^{Gas}_{b,s,h}
-R^{g}_{g,y,h}
-\]
-
-- \(b\): building ID
-- \(p\): electricity provider and tariff
-- \(g\): gas provider
-- \(m\): selected rate month
-- \(s\): January, August, or annual hourly consumption profile
-- \(D_{y,m}\): actual number of days in the selected calendar month
+For the annual-average selection, the annual usage profile is combined with
+each of the 12 monthly electricity-rate profiles. The resulting annual cost is
+divided by 12.
 """
 )
