@@ -1,0 +1,6 @@
+VALIDATION PASSED
+data_load_seconds=0.3478
+1: median_calculation_seconds=0.1648; hpwh_mean=13.729171; gas_mean=11.377989; propane_mean=35.133885; resistance_mean=46.730839
+8: median_calculation_seconds=0.1693; hpwh_mean=7.542278; gas_mean=8.093591; propane_mean=24.977644; resistance_mean=38.455708
+year: median_calculation_seconds=0.2902; hpwh_mean=9.885524; gas_mean=9.669581; propane_mean=29.866134; resistance_mean=41.825446
+county_scenarios_validated=27
