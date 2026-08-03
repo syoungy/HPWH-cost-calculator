@@ -46,6 +46,8 @@ class CountyScenarioResult:
     propane_summary: dict[str, float | int]
     resistance_summary: dict[str, float | int]
     hpwh_minus_gas_summary: dict[str, float | int]
+    geography_label: str
+    sample_counties: tuple[str, ...]
     electric_provider: str
     gas_provider: str
     electric_tariff: str
@@ -676,26 +678,44 @@ def _selected_gas_scenario(
 
 def calculate_county_scenario(
     data: CalculatorData,
-    county: str,
+    county: str | tuple[str, ...],
     electric_provider: str,
     electric_tariff: str,
     gas_provider: str,
     gas_tariff: str,
     period: str,
     propane_price_per_gallon: float = DEFAULT_PROPANE_PRICE_PER_GALLON,
+    geography_label: str | None = None,
 ) -> CountyScenarioResult:
     if period not in SUPPORTED_PERIODS:
         raise ValueError(f"Unsupported period: {period}")
     if propane_price_per_gallon < 0:
         raise ValueError("Propane price cannot be negative.")
 
-    houses = _houses_with_profiles(data, period)
-    houses = houses[houses["in.county_name"].astype(str) == str(county)].copy()
-    if houses.empty:
-        raise ValueError(f"No mapped sample households were found for {county}.")
+    sample_counties = (county,) if isinstance(county, str) else tuple(county)
+    sample_counties = tuple(str(value) for value in sample_counties)
+    if not sample_counties:
+        raise ValueError("At least one sample county is required.")
 
-    # The scenario applies the selected utilities to every sampled house in the
-    # county, as requested, rather than dropping houses mapped to another utility.
+    label = geography_label or (
+        sample_counties[0]
+        if len(sample_counties) == 1
+        else " + ".join(sample_counties)
+    )
+
+    houses = _houses_with_profiles(data, period)
+    houses = houses[
+        houses["in.county_name"].astype(str).isin(sample_counties)
+    ].copy()
+    if houses.empty:
+        raise ValueError(
+            f"No mapped sample households were found for {label}: "
+            f"{', '.join(sample_counties)}."
+        )
+
+    # The selected utilities are applied to every sampled household in the
+    # chosen county or multi-county area. This intentionally permits a tariff
+    # scenario that differs from the provider mapping in the source workbook.
     electric_scenario = _selected_electric_scenario(
         data, electric_provider, electric_tariff, period
     )
@@ -730,7 +750,8 @@ def calculate_county_scenario(
     result = pd.DataFrame(
         {
             "bldg_id": houses["bldg_id"].astype(str).to_numpy(),
-            "county": str(county),
+            "scenario_geography": str(label),
+            "county": houses["in.county_name"].astype(str).to_numpy(),
             "electric_provider": str(electric_provider),
             "electric_tariff": str(electric_tariff),
             "electric_year": int(electric_scenario["electric_year"]),
@@ -758,6 +779,8 @@ def calculate_county_scenario(
         propane_summary=_summary(result["propane_monthly_cost"]),
         resistance_summary=_summary(result["resistance_monthly_cost"]),
         hpwh_minus_gas_summary=_summary(result["hpwh_minus_gas"]),
+        geography_label=str(label),
+        sample_counties=sample_counties,
         electric_provider=str(electric_provider),
         gas_provider=str(gas_provider),
         electric_tariff=str(electric_tariff),
