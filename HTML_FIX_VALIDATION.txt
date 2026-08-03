@@ -1,0 +1,2 @@
+html_card_validation=passed
+calculation_validation=passed
