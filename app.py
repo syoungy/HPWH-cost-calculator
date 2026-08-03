@@ -130,30 +130,35 @@ def show_summary_card(
     interval: dict[str, float | int] | None = None,
 ) -> None:
     column.metric(title, money(float(summary["mean"])))
+
+    # Markdown interprets HTML lines indented by four or more spaces as a
+    # code block. Build the markup without any leading indentation.
     interval_html = ""
     if interval is not None:
-        interval_html = f"""
-            <div style="font-size:1.14rem;font-weight:750;margin-bottom:0.32rem;">
-                Interval 95%: {money(float(interval['mean']))}
-                <span style="font-size:0.90rem;font-weight:600;">
-                    ({int(interval['n'])} households)
-                </span>
-            </div>
-        """
-    column.markdown(
-        f"""
-        <div style="margin-top:0.32rem;line-height:1.45;color:inherit;">
-            {interval_html}
-            <div style="font-size:0.96rem;font-weight:500;margin-bottom:0.16rem;">
-                Range: {money(float(summary['min']))} – {money(float(summary['max']))}
-            </div>
-            <div style="font-size:0.96rem;font-weight:500;">
-                Households: {int(summary['n'])}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+        interval_html = (
+            '<div style="font-size:1.14rem;font-weight:750;'
+            'margin-bottom:0.32rem;color:inherit;">'
+            f'Interval 95%: {money(float(interval["mean"]))} '
+            '<span style="font-size:0.90rem;font-weight:600;color:inherit;">'
+            f'({int(interval["n"])} households)'
+            '</span>'
+            '</div>'
+        )
+
+    card_html = (
+        '<div style="margin-top:0.32rem;line-height:1.45;color:inherit;">'
+        f'{interval_html}'
+        '<div style="font-size:0.96rem;font-weight:500;'
+        'margin-bottom:0.16rem;color:inherit;">'
+        f'Range: {money(float(summary["min"]))} – '
+        f'{money(float(summary["max"]))}'
+        '</div>'
+        '<div style="font-size:0.96rem;font-weight:500;color:inherit;">'
+        f'Households: {int(summary["n"])}'
+        '</div>'
+        '</div>'
     )
+    column.markdown(card_html, unsafe_allow_html=True)
 
 
 def add_house_number(frame: pd.DataFrame, data) -> pd.DataFrame:
