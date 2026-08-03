@@ -43,15 +43,29 @@ PERIOD_OPTIONS = {
     "8": "August",
     "year": "Annual average",
 }
-COUNTY_OPTIONS = [
-    "Wayne County",
-    "Kent County",
-    "Washtenaw County",
-]
+REGION_CONFIGS = {
+    "Wayne County": {
+        "counties": ("Wayne County",),
+    },
+    "Kent County": {
+        "counties": ("Kent County",),
+    },
+    "Washtenaw County": {
+        "counties": ("Washtenaw County",),
+    },
+    "Holland": {
+        "counties": ("Ottawa County", "Allegan County"),
+        "electric_provider": "Holland board of public works",
+        "gas_provider": "SEMCO Energy Gas Company",
+    },
+}
+REGION_OPTIONS = list(REGION_CONFIGS)
 
 
 def tariff_name(value: object) -> str:
     text = str(value)
+    if text == "-":
+        return "Standard Rate"
     label = TARIFF_LABELS.get(text, text)
     return f"{label} ({text})" if label != text else text
 
@@ -102,7 +116,8 @@ def calculate_statewide_cached(
 @st.cache_data(show_spinner=False)
 def calculate_county_cached(
     signature: tuple[tuple[str, int, int], ...],
-    county: str,
+    geography_label: str,
+    sample_counties: tuple[str, ...],
     electric_provider: str,
     electric_tariff: str,
     gas_provider: str,
@@ -113,7 +128,8 @@ def calculate_county_cached(
     data = load_all_data(signature)
     return calculate_county_scenario(
         data=data,
-        county=county,
+        county=sample_counties,
+        geography_label=geography_label,
         electric_provider=electric_provider,
         electric_tariff=electric_tariff,
         gas_provider=gas_provider,
@@ -250,16 +266,36 @@ def render_statewide_charts(result: StatewideResult) -> None:
         st.line_chart(rates, height=330)
 
 
-def provider_for_county(data, county: str, column: str) -> str:
+def provider_for_counties(
+    data,
+    counties: tuple[str, ...],
+    column: str,
+) -> str:
     values = sorted(
         data.provider_map.loc[
-            data.provider_map["in.county_name"].astype(str) == str(county),
+            data.provider_map["in.county_name"].astype(str).isin(counties),
             column,
         ].dropna().astype(str).unique().tolist()
     )
     if not values:
-        raise ValueError(f"No {column} mapping is available for {county}.")
+        raise ValueError(
+            f"No {column} mapping is available for {', '.join(counties)}."
+        )
     return values[0]
+
+
+def region_settings(data, region_label: str) -> tuple[tuple[str, ...], str, str]:
+    config = REGION_CONFIGS[region_label]
+    counties = tuple(str(value) for value in config["counties"])
+    electric_provider = str(
+        config.get("electric_provider")
+        or provider_for_counties(data, counties, "elec_provd")
+    )
+    gas_provider = str(
+        config.get("gas_provider")
+        or provider_for_counties(data, counties, "gas_provd")
+    )
+    return counties, electric_provider, gas_provider
 
 
 st.set_page_config(
@@ -268,7 +304,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("Residential Water-Heater Energy Cost Calculator — v4.0")
+st.title("Residential Water-Heater Energy Cost Calculator — v4.1")
 st.caption(
     "HPWH, natural gas, propane, and electric resistance scenarios. "
     "All costs are variable energy charges only; fixed customer charges, taxes, "
@@ -294,7 +330,7 @@ with st.sidebar:
     st.header("Input")
     analysis_mode = st.radio(
         "Analysis mode",
-        ["All Michigan sample", "County scenario"],
+        ["All Michigan sample", "County / area scenario"],
         key="analysis_mode",
     )
 
@@ -326,23 +362,24 @@ with st.sidebar:
         )
 
     else:
-        selected_county = st.selectbox(
-            "County",
-            COUNTY_OPTIONS,
-            key="county_input",
+        selected_region = st.selectbox(
+            "County / area",
+            REGION_OPTIONS,
+            key="region_input",
         )
-        selected_county_period = st.selectbox(
+        selected_region_period = st.selectbox(
             "Period",
             list(PERIOD_OPTIONS),
             format_func=lambda code: PERIOD_OPTIONS[code],
-            key="county_period_input",
+            key="region_period_input",
         )
 
         try:
-            electric_provider = provider_for_county(data, selected_county, "elec_provd")
-            gas_provider = provider_for_county(data, selected_county, "gas_provd")
+            sample_counties, electric_provider, gas_provider = region_settings(
+                data, selected_region
+            )
             electric_tariffs = available_electric_tariffs(
-                data, electric_provider, selected_county_period
+                data, electric_provider, selected_region_period
             )
             gas_tariffs = available_gas_tariffs(data, gas_provider)
         except Exception as exc:
@@ -353,59 +390,73 @@ with st.sidebar:
             st.error("No complete tariff is available for the selected scenario.")
             st.stop()
 
-        current_electric = st.session_state.get("county_electric_tariff_input")
+        current_electric = st.session_state.get("region_electric_tariff_input")
         if current_electric not in electric_tariffs:
-            st.session_state["county_electric_tariff_input"] = electric_tariffs[0]
-        current_gas = st.session_state.get("county_gas_tariff_input")
+            st.session_state["region_electric_tariff_input"] = electric_tariffs[0]
+        current_gas = st.session_state.get("region_gas_tariff_input")
         if current_gas not in gas_tariffs:
-            st.session_state["county_gas_tariff_input"] = gas_tariffs[0]
+            st.session_state["region_gas_tariff_input"] = gas_tariffs[0]
 
         selected_electric_tariff = st.selectbox(
             f"Electricity tariff — {electric_provider}",
             electric_tariffs,
             format_func=tariff_name,
-            key="county_electric_tariff_input",
+            key="region_electric_tariff_input",
         )
         selected_gas_tariff = st.selectbox(
             f"Gas tariff — {gas_provider}",
             gas_tariffs,
             format_func=tariff_name,
-            key="county_gas_tariff_input",
+            key="region_gas_tariff_input",
         )
-        selected_county_propane_price = st.number_input(
+        selected_region_propane_price = st.number_input(
             "Propane price ($/gallon)",
             min_value=0.0,
             value=float(DEFAULT_PROPANE_PRICE_PER_GALLON),
             step=0.01,
             format="%.3f",
-            key="county_propane_price_input",
+            key="region_propane_price_input",
         )
 
-        default_county_applied = {
-            "county": selected_county,
-            "period": selected_county_period,
+        sample_count = int(
+            data.provider_map["in.county_name"]
+            .astype(str)
+            .isin(sample_counties)
+            .sum()
+        )
+        st.caption(
+            f"Sample counties: {', '.join(sample_counties)} · "
+            f"Sample households: {sample_count}"
+        )
+
+        default_region_applied = {
+            "region": selected_region,
+            "sample_counties": sample_counties,
+            "period": selected_region_period,
             "electric_provider": electric_provider,
             "electric_tariff": electric_tariffs[0],
             "gas_provider": gas_provider,
             "gas_tariff": gas_tariffs[0],
             "propane_price": float(DEFAULT_PROPANE_PRICE_PER_GALLON),
         }
-        st.session_state.setdefault("applied_county", default_county_applied)
+        st.session_state.setdefault("applied_region", default_region_applied)
 
         if st.button("Calculate / Update", type="primary", use_container_width=True):
-            st.session_state["applied_county"] = {
-                "county": selected_county,
-                "period": selected_county_period,
+            st.session_state["applied_region"] = {
+                "region": selected_region,
+                "sample_counties": sample_counties,
+                "period": selected_region_period,
                 "electric_provider": electric_provider,
                 "electric_tariff": selected_electric_tariff,
                 "gas_provider": gas_provider,
                 "gas_tariff": selected_gas_tariff,
-                "propane_price": float(selected_county_propane_price),
+                "propane_price": float(selected_region_propane_price),
             }
 
-        applied = st.session_state["applied_county"]
+        applied = st.session_state["applied_region"]
         st.caption(
-            f"Applied: {applied['county']} · {PERIOD_OPTIONS[applied['period']]}"
+            f"Applied: {applied['region']} · "
+            f"{PERIOD_OPTIONS[applied['period']]}"
         )
 
 
@@ -463,11 +514,12 @@ if analysis_mode == "All Michigan sample":
         render_statewide_details(result, data)
 
 else:
-    applied = st.session_state["applied_county"]
-    with st.spinner("Calculating county scenario..."):
+    applied = st.session_state["applied_region"]
+    with st.spinner("Calculating county / area scenario..."):
         result = calculate_county_cached(
             signature,
-            applied["county"],
+            applied["region"],
+            tuple(applied["sample_counties"]),
             applied["electric_provider"],
             applied["electric_tariff"],
             applied["gas_provider"],
@@ -477,40 +529,85 @@ else:
         )
 
     st.subheader(
-        f"Results — {applied['county']} · {PROFILE_LABELS[applied['period']]}"
+        f"Results — {applied['region']} · "
+        f"{PROFILE_LABELS[applied['period']]}"
     )
     st.caption(
-        f"Electricity: {result.electric_provider} / {tariff_name(result.electric_tariff)} · "
+        f"Sample counties: {', '.join(result.sample_counties)} · "
+        f"Households: {len(result.households)} · "
+        f"Electricity: {result.electric_provider} / "
+        f"{tariff_name(result.electric_tariff)} · "
         f"Gas: {result.gas_provider} / {tariff_name(result.gas_tariff)} · "
         f"Propane: ${float(applied['propane_price']):.3f}/gallon"
     )
 
     first_1, first_2, first_3 = st.columns(3)
-    show_summary_card(first_1, "HPWH monthly electricity cost", result.hpwh_summary)
-    show_summary_card(first_2, "Natural-gas WH monthly cost", result.gas_summary)
-    show_summary_card(first_3, "HPWH − Gas WH cost difference", result.hpwh_minus_gas_summary)
+    show_summary_card(
+        first_1,
+        "HPWH monthly electricity cost",
+        result.hpwh_summary,
+    )
+    show_summary_card(
+        first_2,
+        "Natural-gas WH monthly cost",
+        result.gas_summary,
+    )
+    show_summary_card(
+        first_3,
+        "HPWH − Gas WH cost difference",
+        result.hpwh_minus_gas_summary,
+    )
 
     st.markdown("### Additional water-heater scenarios")
     second_1, second_2 = st.columns(2)
-    show_summary_card(second_1, "Propane WH monthly cost", result.propane_summary)
-    show_summary_card(second_2, "Electric resistance WH monthly cost", result.resistance_summary)
+    show_summary_card(
+        second_1,
+        "Propane WH monthly cost",
+        result.propane_summary,
+    )
+    show_summary_card(
+        second_2,
+        "Electric resistance WH monthly cost",
+        result.resistance_summary,
+    )
 
     st.caption(
         "The selected electricity and gas tariffs are applied to every sampled "
-        "household in the selected county."
+        "household in the selected county or multi-county area. For Holland, "
+        "Ottawa and Allegan County sample households are pooled and the Holland "
+        "Board of Public Works and SEMCO tariffs are applied as a scenario."
     )
 
-    if st.checkbox("Show county household table", value=False):
+    if len(result.households) < 10:
+        st.warning(
+            f"Small pilot sample: this scenario contains only "
+            f"{len(result.households)} households and should not be interpreted "
+            "as representative of the full service territory."
+        )
+
+    if st.checkbox("Show regional household table", value=False):
         display = result.households.sort_values(
-            "bldg_id",
-            key=lambda series: pd.to_numeric(series, errors="coerce"),
+            ["county", "bldg_id"],
+            key=lambda series: (
+                pd.to_numeric(series, errors="coerce")
+                if series.name == "bldg_id"
+                else series.astype(str)
+            ),
             kind="stable",
         ).reset_index(drop=True)
-        display.insert(0, "County House No.", range(1, len(display) + 1))
+        display.insert(0, "Area House No.", range(1, len(display) + 1))
         st.dataframe(display, use_container_width=True, hide_index=True, height=620)
+        safe_name = (
+            applied["region"]
+            .lower()
+            .replace(" ", "_")
+            .replace("(", "")
+            .replace(")", "")
+            .replace("+", "and")
+        )
         st.download_button(
-            "Download county results as CSV",
+            "Download regional results as CSV",
             display.to_csv(index=False).encode("utf-8"),
-            file_name=f"{applied['county'].lower().replace(' ', '_')}_scenario.csv",
+            file_name=f"{safe_name}_scenario.csv",
             mime="text/csv",
         )
