@@ -1,0 +1,10 @@
+VALIDATION PASSED
+updated_holland_rate_rows=12
+holland_sample_households=4
+ottawa_households=3
+allegan_households=1
+regional_scenarios_validated=30
+holland_annual_median_seconds=0.1656
+holland_1: hpwh_mean=3.319158; gas_mean=11.470219; propane_mean=38.196527; resistance_mean=13.532220; hpwh_minus_gas=-8.151061
+holland_8: hpwh_mean=2.289181; gas_mean=7.990315; propane_mean=26.608234; resistance_mean=11.567387; hpwh_minus_gas=-5.701133
+holland_year: hpwh_mean=2.903902; gas_mean=9.851928; propane_mean=32.807520; resistance_mean=12.953551; hpwh_minus_gas=-6.948026
