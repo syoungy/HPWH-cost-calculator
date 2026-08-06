@@ -1,0 +1,26 @@
+CODE VALIDATION PASSED
+Version: v5.0 space-heating update
+
+Validated:
+- app.py, calculations.py, and data_loading.py compile successfully.
+- The new Space heating analysis mode is present.
+- The Space heating County / area selector contains Traverse City.
+- Traverse City Light & Power Phase In and Phase Out tariff discovery works.
+- DTE Gas Company tariff discovery works.
+- January, August, and annual-average calculation paths execute.
+- Zero August space-heating profiles are allowed and are not treated as missing data.
+- Propane is derived from the natural-gas space-heating profile, not the heat-pump electricity profile.
+- Central-95% calculations handle zero-heavy August gas profiles.
+
+Input-file validation status:
+- MI_housesample_gt_Space_gas_hourly_average_kwh.xlsx was available and has
+  75 households, 225 rows, and profiles 1 / 8 / year.
+- The actual MI_housesample_gt_Space_elec_hourly_average_kwh.xlsx workbook was
+  not attached in this chat, so its numeric results could not be independently
+  validated here.
+- The calculation path was smoke-tested using a schema-compatible 75-household
+  placeholder electricity workbook with matching building IDs. That placeholder
+  is NOT included in the deliverable.
+
+Run validate_space_heating_inputs.py after placing both actual space-heating
+workbooks in the repository root.

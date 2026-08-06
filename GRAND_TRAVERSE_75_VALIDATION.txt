@@ -1,0 +1,15 @@
+VALIDATION PASSED
+grand_traverse_households=75
+paired_hpwh_gas_ids=True
+electric_tariffs=Phase In, Phase Out
+gas_provider=DTE Gas Company
+propane_price_per_gallon=2.370
+electric_resistance_source=GT natural-gas hourly input × 0.62 / 0.95
+electric_resistance_does_not_use_hpwh_profile=True
+statewide_sample_preserved=149
+result period=1 tariff=Phase In hpwh=6.298913 gas=11.398915 propane=32.047928 resistance=22.106097 hpwh_minus_gas=-5.100002
+result period=1 tariff=Phase Out hpwh=5.398741 gas=11.398915 propane=32.047928 resistance=18.915293 hpwh_minus_gas=-6.000174
+result period=8 tariff=Phase In hpwh=3.660530 gas=8.163753 propane=22.952304 resistance=18.763717 hpwh_minus_gas=-4.503222
+result period=8 tariff=Phase Out hpwh=4.377521 gas=8.163753 propane=22.952304 resistance=22.342415 hpwh_minus_gas=-3.786231
+result period=year tariff=Phase In hpwh=4.763275 gas=9.722956 propane=27.335986 resistance=20.022218 hpwh_minus_gas=-4.959681
+result period=year tariff=Phase Out hpwh=4.678545 gas=9.722956 propane=27.335986 resistance=19.633484 hpwh_minus_gas=-5.044411
