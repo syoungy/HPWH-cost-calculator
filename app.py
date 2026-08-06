@@ -11,10 +11,12 @@ from calculations import (
     PROPANE_KWH_PER_GALLON,
     PROPANE_WH_EFFICIENCY,
     RESISTANCE_WH_EFFICIENCY,
+    SpaceHeatingResult,
     StatewideResult,
     available_electric_tariffs,
     available_gas_tariffs,
     calculate_county_scenario,
+    calculate_space_heating_scenario,
     calculate_statewide,
 )
 from data_loading import (
@@ -24,6 +26,8 @@ from data_loading import (
     GAS_USAGE_FILE,
     GT_ELECTRICITY_USAGE_FILE,
     GT_GAS_USAGE_FILE,
+    GT_SPACE_ELECTRICITY_USAGE_FILE,
+    GT_SPACE_GAS_USAGE_FILE,
     PROFILE_LABELS,
     PROVIDER_FILE,
     RATE_HOUR_COLUMNS,
@@ -39,6 +43,8 @@ REQUIRED_FILES = [
     GAS_USAGE_FILE,
     GT_ELECTRICITY_USAGE_FILE,
     GT_GAS_USAGE_FILE,
+    GT_SPACE_ELECTRICITY_USAGE_FILE,
+    GT_SPACE_GAS_USAGE_FILE,
     PROVIDER_FILE,
     ELECTRICITY_RATE_FILE,
     GAS_RATE_FILE,
@@ -71,6 +77,15 @@ REGION_CONFIGS = {
     },
 }
 REGION_OPTIONS = list(REGION_CONFIGS)
+
+SPACE_HEATING_REGION_CONFIGS = {
+    "Traverse City": {
+        "counties": ("Grand Traverse County",),
+        "electric_provider": "Traverse city light & power",
+        "gas_provider": "DTE Gas Company",
+    },
+}
+SPACE_HEATING_REGION_OPTIONS = list(SPACE_HEATING_REGION_CONFIGS)
 
 
 def tariff_name(value: object) -> str:
@@ -270,6 +285,32 @@ def calculate_county_cached(
     )
 
 
+@st.cache_data(show_spinner=False)
+def calculate_space_heating_cached(
+    signature: tuple[tuple[str, int, int], ...],
+    geography_label: str,
+    sample_counties: tuple[str, ...],
+    electric_provider: str,
+    electric_tariff: str,
+    gas_provider: str,
+    gas_tariff: str,
+    period: str,
+    propane_price: float,
+) -> SpaceHeatingResult:
+    data = load_all_data(signature)
+    return calculate_space_heating_scenario(
+        data=data,
+        county=sample_counties,
+        geography_label=geography_label,
+        electric_provider=electric_provider,
+        electric_tariff=electric_tariff,
+        gas_provider=gas_provider,
+        gas_tariff=gas_tariff,
+        period=period,
+        propane_price_per_gallon=propane_price,
+    )
+
+
 def show_summary_card(
     column,
     title: str,
@@ -445,16 +486,16 @@ def region_sample_count(data, usage_sample: str, counties: tuple[str, ...]) -> i
 
 
 st.set_page_config(
-    page_title="Water-heater energy cost calculator",
-    page_icon="💧",
+    page_title="Residential energy cost calculator",
+    page_icon="🏠",
     layout="wide",
 )
 
-st.title("Residential Water-Heater Energy Cost Calculator — v4.3.2")
+st.title("Residential Water-Heating and Space-Heating Cost Calculator — v5.0")
 st.caption(
-    "HPWH, natural gas, propane, and electric resistance scenarios. "
-    "All costs are variable energy charges only; fixed customer charges, taxes, "
-    "installation, and maintenance are not included."
+    "Water-heating and space-heating technology scenarios. All costs are "
+    "variable energy charges only; fixed customer charges, taxes, installation, "
+    "and maintenance are not included."
 )
 
 signature = data_signature()
@@ -476,7 +517,11 @@ with st.sidebar:
     st.header("Input")
     analysis_mode = st.radio(
         "Analysis mode",
-        ["All Michigan sample", "County / area scenario"],
+        [
+            "All Michigan sample",
+            "County / area scenario",
+            "Space heating",
+        ],
         key="analysis_mode",
     )
 
@@ -495,7 +540,12 @@ with st.sidebar:
             format="%.3f",
             key="statewide_propane_price_input",
         )
-        if st.button("Calculate / Update", type="primary", use_container_width=True):
+        if st.button(
+            "Calculate / Update",
+            type="primary",
+            use_container_width=True,
+            key="statewide_calculate_button",
+        ):
             st.session_state["applied_statewide"] = {
                 "period": selected_period,
                 "propane_price": float(selected_propane_price),
@@ -507,7 +557,7 @@ with st.sidebar:
             f"Propane ${applied['propane_price']:.3f}/gal"
         )
 
-    else:
+    elif analysis_mode == "County / area scenario":
         selected_region = st.selectbox(
             "County / area",
             REGION_OPTIONS,
@@ -528,7 +578,9 @@ with st.sidebar:
                 usage_sample,
             ) = region_settings(data, selected_region)
             electric_tariffs = available_electric_tariffs(
-                data, electric_provider, selected_region_period
+                data,
+                electric_provider,
+                selected_region_period,
             )
             gas_tariffs = available_gas_tariffs(data, gas_provider)
         except Exception as exc:
@@ -568,7 +620,9 @@ with st.sidebar:
         )
 
         sample_count = region_sample_count(
-            data, usage_sample, sample_counties
+            data,
+            usage_sample,
+            sample_counties,
         )
         st.caption(
             f"Sample counties: {', '.join(sample_counties)} · "
@@ -588,7 +642,12 @@ with st.sidebar:
         }
         st.session_state.setdefault("applied_region", default_region_applied)
 
-        if st.button("Calculate / Update", type="primary", use_container_width=True):
+        if st.button(
+            "Calculate / Update",
+            type="primary",
+            use_container_width=True,
+            key="region_calculate_button",
+        ):
             st.session_state["applied_region"] = {
                 "region": selected_region,
                 "sample_counties": sample_counties,
@@ -602,6 +661,120 @@ with st.sidebar:
             }
 
         applied = st.session_state["applied_region"]
+        st.caption(
+            f"Applied: {applied['region']} · "
+            f"{PERIOD_OPTIONS[applied['period']]}"
+        )
+
+    else:
+        selected_space_region = st.selectbox(
+            "County / area",
+            SPACE_HEATING_REGION_OPTIONS,
+            key="space_region_input",
+        )
+        selected_space_period = st.selectbox(
+            "Period",
+            list(PERIOD_OPTIONS),
+            format_func=lambda code: PERIOD_OPTIONS[code],
+            key="space_period_input",
+        )
+
+        space_config = SPACE_HEATING_REGION_CONFIGS[selected_space_region]
+        space_counties = tuple(space_config["counties"])
+        space_electric_provider = str(space_config["electric_provider"])
+        space_gas_provider = str(space_config["gas_provider"])
+
+        try:
+            space_electric_tariffs = available_electric_tariffs(
+                data,
+                space_electric_provider,
+                selected_space_period,
+            )
+            space_gas_tariffs = available_gas_tariffs(
+                data,
+                space_gas_provider,
+            )
+        except Exception as exc:
+            st.error(str(exc))
+            st.stop()
+
+        if not space_electric_tariffs or not space_gas_tariffs:
+            st.error("No complete tariff is available for the selected scenario.")
+            st.stop()
+
+        current_space_electric = st.session_state.get(
+            "space_electric_tariff_input"
+        )
+        if current_space_electric not in space_electric_tariffs:
+            st.session_state["space_electric_tariff_input"] = (
+                space_electric_tariffs[0]
+            )
+        current_space_gas = st.session_state.get("space_gas_tariff_input")
+        if current_space_gas not in space_gas_tariffs:
+            st.session_state["space_gas_tariff_input"] = space_gas_tariffs[0]
+
+        selected_space_electric_tariff = st.selectbox(
+            f"Electricity tariff — {space_electric_provider}",
+            space_electric_tariffs,
+            format_func=tariff_name,
+            key="space_electric_tariff_input",
+        )
+        selected_space_gas_tariff = st.selectbox(
+            f"Gas tariff — {space_gas_provider}",
+            space_gas_tariffs,
+            format_func=tariff_name,
+            key="space_gas_tariff_input",
+        )
+        selected_space_propane_price = st.number_input(
+            "Propane price ($/gallon)",
+            min_value=0.0,
+            value=float(DEFAULT_PROPANE_PRICE_PER_GALLON),
+            step=0.01,
+            format="%.3f",
+            key="space_propane_price_input",
+        )
+
+        space_sample_count = int(
+            data.gt_space_electricity_usage["bldg_id"].nunique()
+        )
+        st.caption(
+            f"Sample counties: {', '.join(space_counties)} · "
+            f"Sample households: {space_sample_count}"
+        )
+
+        default_space_applied = {
+            "region": selected_space_region,
+            "sample_counties": space_counties,
+            "period": selected_space_period,
+            "electric_provider": space_electric_provider,
+            "electric_tariff": space_electric_tariffs[0],
+            "gas_provider": space_gas_provider,
+            "gas_tariff": space_gas_tariffs[0],
+            "propane_price": float(DEFAULT_PROPANE_PRICE_PER_GALLON),
+        }
+        st.session_state.setdefault(
+            "applied_space_heating",
+            default_space_applied,
+        )
+
+        if st.button(
+            "Calculate / Update",
+            type="primary",
+            use_container_width=True,
+            key="space_calculate_button",
+        ):
+            st.session_state["applied_space_heating"] = {
+                "region": selected_space_region,
+                "sample_counties": space_counties,
+                "period": selected_space_period,
+                "electric_provider": space_electric_provider,
+                "electric_tariff": selected_space_electric_tariff,
+                "gas_provider": space_gas_provider,
+                "gas_tariff": selected_space_gas_tariff,
+                "propane_price": float(selected_space_propane_price),
+            }
+
+        applied = st.session_state["applied_space_heating"]
         st.caption(
             f"Applied: {applied['region']} · "
             f"{PERIOD_OPTIONS[applied['period']]}"
@@ -624,14 +797,39 @@ if analysis_mode == "All Michigan sample":
     )
 
     first_1, first_2, first_3 = st.columns(3)
-    show_summary_card(first_1, "HPWH monthly electricity cost", result.hpwh_summary, result.interval_95["hpwh"])
-    show_summary_card(first_2, "Natural-gas WH monthly cost", result.gas_summary, result.interval_95["gas"])
-    show_summary_card(first_3, "HPWH − Gas WH cost difference", result.hpwh_minus_gas_summary, result.interval_95["hpwh_minus_gas"])
+    show_summary_card(
+        first_1,
+        "HPWH monthly electricity cost",
+        result.hpwh_summary,
+        result.interval_95["hpwh"],
+    )
+    show_summary_card(
+        first_2,
+        "Natural-gas WH monthly cost",
+        result.gas_summary,
+        result.interval_95["gas"],
+    )
+    show_summary_card(
+        first_3,
+        "HPWH − Gas WH cost difference",
+        result.hpwh_minus_gas_summary,
+        result.interval_95["hpwh_minus_gas"],
+    )
 
     st.markdown("### Additional water-heater scenarios")
     second_1, second_2 = st.columns(2)
-    show_summary_card(second_1, "Propane WH monthly cost", result.propane_summary, result.interval_95["propane"])
-    show_summary_card(second_2, "Electric resistance WH monthly cost", result.resistance_summary, result.interval_95["resistance"])
+    show_summary_card(
+        second_1,
+        "Propane WH monthly cost",
+        result.propane_summary,
+        result.interval_95["propane"],
+    )
+    show_summary_card(
+        second_2,
+        "Electric resistance WH monthly cost",
+        result.resistance_summary,
+        result.interval_95["resistance"],
+    )
 
     st.caption(
         "Gas, propane, and electric-resistance Central 95% means use the same "
@@ -661,7 +859,7 @@ if analysis_mode == "All Michigan sample":
     if show_details:
         render_statewide_details(result, data)
 
-else:
+elif analysis_mode == "County / area scenario":
     applied = st.session_state["applied_region"]
     with st.spinner("Calculating county / area scenario..."):
         result = calculate_county_cached(
@@ -677,7 +875,8 @@ else:
             applied.get(
                 "usage_sample",
                 REGION_CONFIGS.get(applied["region"], {}).get(
-                    "usage_sample", "mapped"
+                    "usage_sample",
+                    "mapped",
                 ),
             ),
         )
@@ -763,7 +962,12 @@ else:
             kind="stable",
         ).reset_index(drop=True)
         display.insert(0, "Area House No.", range(1, len(display) + 1))
-        st.dataframe(display, use_container_width=True, hide_index=True, height=620)
+        st.dataframe(
+            display,
+            use_container_width=True,
+            hide_index=True,
+            height=620,
+        )
         safe_name = (
             applied["region"]
             .lower()
@@ -776,5 +980,119 @@ else:
             "Download regional results as CSV",
             display.to_csv(index=False).encode("utf-8"),
             file_name=f"{safe_name}_scenario.csv",
+            mime="text/csv",
+        )
+
+else:
+    applied = st.session_state["applied_space_heating"]
+    with st.spinner("Calculating space-heating scenario..."):
+        result = calculate_space_heating_cached(
+            signature,
+            applied["region"],
+            tuple(applied["sample_counties"]),
+            applied["electric_provider"],
+            applied["electric_tariff"],
+            applied["gas_provider"],
+            applied["gas_tariff"],
+            applied["period"],
+            float(applied["propane_price"]),
+        )
+
+    st.subheader(
+        f"Space-heating results — {applied['region']} · "
+        f"{PROFILE_LABELS[applied['period']]}"
+    )
+    st.caption(
+        f"Sample counties: {', '.join(result.sample_counties)} · "
+        f"Households: {len(result.households)} · "
+        f"Electricity: {result.electric_provider} / "
+        f"{tariff_name(result.electric_tariff)} · "
+        f"Gas: {result.gas_provider} / {tariff_name(result.gas_tariff)} · "
+        f"Propane: ${float(applied['propane_price']):.3f}/gallon"
+    )
+    st.caption(
+        "Usage source: dedicated Grand Traverse paired sample — heat-pump "
+        "space-heating electricity and baseline natural-gas space heating."
+    )
+
+    first_1, first_2, first_3 = st.columns(3)
+    show_summary_card(
+        first_1,
+        "Heat-pump space-heating monthly electricity cost",
+        result.heat_pump_summary,
+        result.interval_95["heat_pump"],
+    )
+    show_summary_card(
+        first_2,
+        "Natural-gas space-heating monthly cost",
+        result.gas_summary,
+        result.interval_95["gas"],
+    )
+    show_summary_card(
+        first_3,
+        "Heat pump − Gas cost difference",
+        result.heat_pump_minus_gas_summary,
+        result.interval_95["heat_pump_minus_gas"],
+    )
+
+    st.markdown("### Additional space-heating scenario")
+    second_1, second_2 = st.columns(2)
+    show_summary_card(
+        second_1,
+        "Propane space-heating monthly cost",
+        result.propane_summary,
+        result.interval_95["propane"],
+    )
+    second_2.empty()
+
+    st.caption(
+        "Central 95% means trim households by space-heating consumption. "
+        "Heat-pump and gas results use their own consumption sets; the cost "
+        "difference uses the intersection."
+    )
+
+    with st.expander("Space-heating assumptions and formulas", expanded=False):
+        st.markdown(
+            f"""
+- Heat-pump electricity profile: `MI_housesample_gt_Space_elec_hourly_average_kwh.xlsx`
+- Natural-gas profile: `MI_housesample_gt_Space_gas_hourly_average_kwh.xlsx`
+- Heat-pump cost uses the uploaded electric space-heating profile directly; it is not derived from gas consumption.
+- Natural-gas cost uses the uploaded gas space-heating profile directly.
+- Propane is based only on the natural-gas space-heating input profile.
+- Propane assumes equivalent combustion efficiency, so propane input energy = natural-gas input energy.
+- Propane gallons = natural-gas input kWh ÷ `{PROPANE_KWH_PER_GALLON:.3f} kWh/gallon`.
+- Propane price: `${float(applied['propane_price']):.3f}/gallon`.
+- January/August use the selected average daily profile multiplied by calendar days.
+- Annual average applies the annual-average daily profile to all 12 monthly electricity tariffs, totals the year, and divides by 12.
+- The source profiles use `out.electricity.heating.energy_consumption..kwh` and `out.natural_gas.heating.energy_consumption..kwh`. Separate fan/pump and backup-heating columns are not added by this calculator.
+            """
+        )
+
+    show_traverse_city_rate_tables(
+        data,
+        str(applied["electric_tariff"]),
+    )
+
+    if st.checkbox(
+        "Show space-heating household table",
+        value=False,
+        key="show_space_household_table",
+    ):
+        display = result.households.sort_values(
+            "bldg_id",
+            key=lambda series: pd.to_numeric(series, errors="coerce"),
+            kind="stable",
+        ).reset_index(drop=True)
+        display.insert(0, "Area House No.", range(1, len(display) + 1))
+        st.dataframe(
+            display,
+            use_container_width=True,
+            hide_index=True,
+            height=620,
+        )
+        st.download_button(
+            "Download space-heating results as CSV",
+            display.to_csv(index=False).encode("utf-8"),
+            file_name="traverse_city_space_heating_scenario.csv",
             mime="text/csv",
         )
