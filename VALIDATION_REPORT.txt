@@ -1,0 +1,28 @@
+VALIDATION PASSED — v5.2
+
+Python checks
+- app.py compiled successfully.
+- calculations.py compiled successfully.
+- data_loading.py compiled successfully.
+
+Mode checks
+- All Michigan loader and calculation passed.
+- County / area Traverse City loader and calculation passed.
+- Space-heating loader and calculation passed.
+- Phase In and Phase Out passed for January, August, and annual average.
+
+All-zero household test
+- Synthetic test created 5 heat-pump households with zero use across all
+  January, August, and annual profiles.
+- Loader did not fail.
+- The 5 households were excluded from both paired files.
+- Eligible sample changed from 75 to 70.
+- August zero-use rows for otherwise eligible households remained included.
+
+Title checks
+- Water-heating modes use:
+  Residential Water-Heating Cost Calculator
+- Space-heating mode uses:
+  Residential Space-Heating Cost Calculator
+
+Calculation formulas were not changed.
