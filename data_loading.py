@@ -11,6 +11,8 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 
 ELECTRICITY_USAGE_FILE = "MI_housesample_elec_hourly_average_kwh.xlsx"
 GAS_USAGE_FILE = "MI_housesample_gas_hourly_average_kwh.xlsx"
+GT_ELECTRICITY_USAGE_FILE = "MI_housesample_gt_elec_hourly_average_kwh.xlsx"
+GT_GAS_USAGE_FILE = "MI_housesample_gt_gas_hourly_average_kwh.xlsx"
 PROVIDER_FILE = "MI_provider_county_with_utility_providers.xlsx"
 ELECTRICITY_RATE_FILE = "electricity_rates_weekdays_202607.xlsx"
 GAS_RATE_FILE = "gas_rates_weekdays_converted_to_kwh_202607.xlsx"
@@ -44,6 +46,8 @@ TARIFF_ALIASES = {
 class CalculatorData:
     electricity_usage: pd.DataFrame
     gas_usage: pd.DataFrame
+    gt_electricity_usage: pd.DataFrame
+    gt_gas_usage: pd.DataFrame
     provider_map: pd.DataFrame
     electricity_rates: pd.DataFrame
     gas_rates: pd.DataFrame
@@ -320,6 +324,64 @@ def load_gas_rates(path: Path) -> pd.DataFrame:
     return rates.reset_index(drop=True)
 
 
+
+def _validate_dedicated_usage_pair(
+    electricity_usage: pd.DataFrame,
+    gas_usage: pd.DataFrame,
+    sample_label: str,
+) -> None:
+    required_profiles = {"1", "8", "year"}
+    electricity_ids = set(electricity_usage["bldg_id"].astype(str))
+    gas_ids = set(gas_usage["bldg_id"].astype(str))
+
+    if not electricity_ids:
+        raise ValueError(f"{sample_label} contains no households.")
+    if electricity_ids != gas_ids:
+        missing_from_electricity = sorted(gas_ids - electricity_ids)
+        missing_from_gas = sorted(electricity_ids - gas_ids)
+        raise ValueError(
+            f"{sample_label} HPWH and gas files do not contain identical "
+            "building IDs. "
+            f"Missing from HPWH: {missing_from_electricity[:10]}; "
+            f"missing from gas: {missing_from_gas[:10]}."
+        )
+
+    for usage_name, usage_df in [
+        ("HPWH electricity", electricity_usage),
+        ("natural-gas input", gas_usage),
+    ]:
+        profile_sets = (
+            usage_df.groupby("bldg_id")["season"]
+            .agg(lambda values: set(values.astype(str)))
+        )
+        incomplete = profile_sets[
+            profile_sets.map(
+                lambda profiles: not required_profiles.issubset(profiles)
+            )
+        ]
+        if not incomplete.empty:
+            examples = {
+                str(building_id): sorted(list(profiles))
+                for building_id, profiles in incomplete.head(10).items()
+            }
+            raise ValueError(
+                f"{sample_label} {usage_name} file is missing one or more "
+                f"required profiles (1, 8, year): {examples}"
+            )
+
+        daily_total = usage_df[USAGE_HOUR_COLUMNS].astype(float).sum(axis=1)
+        nonpositive = daily_total <= 0
+        if nonpositive.any():
+            examples = (
+                usage_df.loc[nonpositive, ["bldg_id", "season"]]
+                .head(10)
+                .to_dict("records")
+            )
+            raise ValueError(
+                f"{sample_label} {usage_name} contains zero or negative "
+                f"daily profiles. Examples: {examples}"
+            )
+
 def load_calculator_data(data_dir: Path = DATA_DIR) -> CalculatorData:
     electric_usage = load_hourly_usage(
         _find_file(data_dir, ELECTRICITY_USAGE_FILE),
@@ -328,6 +390,19 @@ def load_calculator_data(data_dir: Path = DATA_DIR) -> CalculatorData:
     gas_usage = load_hourly_usage(
         _find_file(data_dir, GAS_USAGE_FILE),
         GAS_USAGE_FILE,
+    )
+    gt_electricity_usage = load_hourly_usage(
+        _find_file(data_dir, GT_ELECTRICITY_USAGE_FILE),
+        GT_ELECTRICITY_USAGE_FILE,
+    )
+    gt_gas_usage = load_hourly_usage(
+        _find_file(data_dir, GT_GAS_USAGE_FILE),
+        GT_GAS_USAGE_FILE,
+    )
+    _validate_dedicated_usage_pair(
+        gt_electricity_usage,
+        gt_gas_usage,
+        "Grand Traverse dedicated sample",
     )
 
     # The corrected electricity sample and provider map define the intended
@@ -381,6 +456,8 @@ def load_calculator_data(data_dir: Path = DATA_DIR) -> CalculatorData:
     return CalculatorData(
         electricity_usage=electric_usage,
         gas_usage=gas_usage,
+        gt_electricity_usage=gt_electricity_usage,
+        gt_gas_usage=gt_gas_usage,
         provider_map=provider_map,
         electricity_rates=load_electricity_rates(
             _find_file(data_dir, ELECTRICITY_RATE_FILE)
