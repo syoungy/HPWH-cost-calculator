@@ -26,6 +26,7 @@ from data_loading import (
     GT_GAS_USAGE_FILE,
     PROFILE_LABELS,
     PROVIDER_FILE,
+    RATE_HOUR_COLUMNS,
     TARIFF_LABELS,
     USAGE_HOUR_COLUMNS,
     load_calculator_data,
@@ -85,6 +86,124 @@ def money(value: float) -> str:
         return "N/A"
     numeric = float(value)
     return f"-${abs(numeric):,.2f}" if numeric < 0 else f"${numeric:,.2f}"
+
+
+
+MONTH_NAMES = {
+    1: "January",
+    2: "February",
+    3: "March",
+    4: "April",
+    5: "May",
+    6: "June",
+    7: "July",
+    8: "August",
+    9: "September",
+    10: "October",
+    11: "November",
+    12: "December",
+}
+
+
+def _hour_display_label(hour: int) -> str:
+    normalized = int(hour) % 24
+    suffix = "AM" if normalized < 12 else "PM"
+    clock_hour = normalized % 12 or 12
+    return f"{clock_hour} {suffix}"
+
+
+def traverse_city_hourly_rate_table(
+    data,
+    tariff: str,
+) -> pd.DataFrame:
+    provider = "Traverse city light & power"
+
+    rates = data.electricity_rates.loc[
+        (data.electricity_rates["elec_provd"].astype(str) == provider)
+        & (data.electricity_rates["tariff"].astype(str) == str(tariff)),
+        ["month", *RATE_HOUR_COLUMNS],
+    ].copy()
+
+    if rates.empty:
+        raise ValueError(
+            f"No electricity-rate rows were found for {provider} / {tariff}."
+        )
+
+    rates["month"] = pd.to_numeric(
+        rates["month"],
+        errors="raise",
+    ).astype(int)
+
+    # Identical duplicate rows are harmless, but conflicting rate rows for
+    # the same month must not be silently displayed or used.
+    rates = rates.drop_duplicates()
+    duplicate_months = rates.loc[
+        rates.duplicated(subset=["month"], keep=False),
+        "month",
+    ].sort_values()
+
+    if not duplicate_months.empty:
+        months = ", ".join(
+            str(month)
+            for month in duplicate_months.unique()
+        )
+        raise ValueError(
+            f"{provider} / {tariff} contains conflicting rate profiles "
+            f"for month(s): {months}."
+        )
+
+    expected_months = list(range(1, 13))
+    actual_months = sorted(rates["month"].tolist())
+    if actual_months != expected_months:
+        raise ValueError(
+            f"{provider} / {tariff} must contain exactly one row for "
+            "each month from January through December."
+        )
+
+    rates = rates.sort_values("month").reset_index(drop=True)
+
+    table = pd.DataFrame(
+        {
+            "Month": rates["month"].map(MONTH_NAMES),
+        }
+    )
+
+    for hour, rate_column in enumerate(RATE_HOUR_COLUMNS):
+        table[_hour_display_label(hour)] = rates[rate_column].map(
+            lambda value: f"${float(value):.5f}"
+        )
+
+    return table
+
+
+def show_traverse_city_rate_tables(
+    data,
+    selected_tariff: str,
+) -> None:
+    st.markdown(
+        "#### Traverse City Light & Power — monthly hourly rate tables"
+    )
+
+    for tariff in ["Phase In", "Phase Out"]:
+        selected_label = (
+            " — Selected for this calculation"
+            if tariff == str(selected_tariff)
+            else ""
+        )
+        st.markdown(f"**{tariff}{selected_label}**")
+        st.dataframe(
+            traverse_city_hourly_rate_table(data, tariff),
+            use_container_width=True,
+            hide_index=True,
+            height=455,
+        )
+
+    st.caption(
+        "Each table shows the variable electricity rate for all 24 hours "
+        "of every month. Rates are displayed in $/kWh and are read directly "
+        "from electricity_rates_weekdays_202607.xlsx."
+    )
+
 
 
 def _data_file_path(filename: str) -> Path:
@@ -331,7 +450,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("Residential Water-Heater Energy Cost Calculator — v4.3")
+st.title("Residential Water-Heater Energy Cost Calculator — v4.3.2")
 st.caption(
     "HPWH, natural gas, propane, and electric resistance scenarios. "
     "All costs are variable energy charges only; fixed customer charges, taxes, "
@@ -619,6 +738,12 @@ else:
         "Grand Traverse sample and applies Traverse City Light & Power and DTE "
         "Gas tariffs."
     )
+
+    if applied["region"] == "Traverse City":
+        show_traverse_city_rate_tables(
+            data,
+            str(applied["electric_tariff"]),
+        )
 
     if len(result.households) < 10:
         st.warning(
