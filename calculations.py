@@ -54,6 +54,7 @@ class CountyScenarioResult:
     gas_tariff: str
     electric_year: int
     gas_year: int
+    usage_sample: str
 
 
 def _summary(values: pd.Series | np.ndarray) -> dict[str, float | int]:
@@ -145,6 +146,24 @@ def _houses_with_profiles(data: CalculatorData, period: str) -> pd.DataFrame:
         .merge(electric, on="bldg_id", how="left", validate="one_to_one")
         .merge(gas, on="bldg_id", how="left", validate="one_to_one")
     )
+    return houses
+
+
+def _dedicated_houses_with_profiles(
+    electricity_usage: pd.DataFrame,
+    gas_usage: pd.DataFrame,
+    period: str,
+    county_label: str,
+) -> pd.DataFrame:
+    electric = _usage_profile(electricity_usage, period, "hpwh")
+    gas = _usage_profile(gas_usage, period, "gas")
+    houses = electric.merge(
+        gas,
+        on="bldg_id",
+        how="inner",
+        validate="one_to_one",
+    )
+    houses.insert(1, "in.county_name", str(county_label))
     return houses
 
 
@@ -686,6 +705,7 @@ def calculate_county_scenario(
     period: str,
     propane_price_per_gallon: float = DEFAULT_PROPANE_PRICE_PER_GALLON,
     geography_label: str | None = None,
+    usage_sample: str = "mapped",
 ) -> CountyScenarioResult:
     if period not in SUPPORTED_PERIODS:
         raise ValueError(f"Unsupported period: {period}")
@@ -703,13 +723,31 @@ def calculate_county_scenario(
         else " + ".join(sample_counties)
     )
 
-    houses = _houses_with_profiles(data, period)
-    houses = houses[
-        houses["in.county_name"].astype(str).isin(sample_counties)
-    ].copy()
+    if usage_sample == "mapped":
+        houses = _houses_with_profiles(data, period)
+        houses = houses[
+            houses["in.county_name"].astype(str).isin(sample_counties)
+        ].copy()
+        empty_message = "No mapped sample households"
+    elif usage_sample == "grand_traverse_dedicated":
+        if sample_counties != ("Grand Traverse County",):
+            raise ValueError(
+                "The Grand Traverse dedicated sample can only be used with "
+                "Grand Traverse County."
+            )
+        houses = _dedicated_houses_with_profiles(
+            data.gt_electricity_usage,
+            data.gt_gas_usage,
+            period,
+            "Grand Traverse County",
+        )
+        empty_message = "No dedicated Grand Traverse sample households"
+    else:
+        raise ValueError(f"Unsupported usage sample: {usage_sample}")
+
     if houses.empty:
         raise ValueError(
-            f"No mapped sample households were found for {label}: "
+            f"{empty_message} were found for {label}: "
             f"{', '.join(sample_counties)}."
         )
 
@@ -787,4 +825,5 @@ def calculate_county_scenario(
         gas_tariff=str(gas_tariff),
         electric_year=int(electric_scenario["electric_year"]),
         gas_year=int(gas_scenario["gas_year"]),
+        usage_sample=str(usage_sample),
     )
