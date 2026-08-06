@@ -1,0 +1,18 @@
+v5.1 mode-specific lazy-loading update
+
+Replace these three files in the GitHub repository root:
+- app.py
+- calculations.py
+- data_loading.py
+
+Do not append them to the current files. Replace each file completely.
+
+What changed:
+- All Michigan sample loads only statewide water-heating files + rates.
+- County / area scenario loads statewide + dedicated GT water-heating files + rates.
+- Space heating loads only the two GT space-heating files + rate workbooks.
+- Streamlit uses cache_resource for loaded DataFrames, avoiding repeated copies.
+- Calculation formulas and result definitions are unchanged.
+
+After committing, use Reboot app in Streamlit Cloud. Clear cache once if the old
+cached objects remain visible.
