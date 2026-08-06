@@ -22,6 +22,8 @@ from data_loading import (
     ELECTRICITY_USAGE_FILE,
     GAS_RATE_FILE,
     GAS_USAGE_FILE,
+    GT_ELECTRICITY_USAGE_FILE,
+    GT_GAS_USAGE_FILE,
     PROFILE_LABELS,
     PROVIDER_FILE,
     TARIFF_LABELS,
@@ -34,6 +36,8 @@ ROOT = Path(__file__).resolve().parent
 REQUIRED_FILES = [
     ELECTRICITY_USAGE_FILE,
     GAS_USAGE_FILE,
+    GT_ELECTRICITY_USAGE_FILE,
+    GT_GAS_USAGE_FILE,
     PROVIDER_FILE,
     ELECTRICITY_RATE_FILE,
     GAS_RATE_FILE,
@@ -57,6 +61,12 @@ REGION_CONFIGS = {
         "counties": ("Ottawa County", "Allegan County"),
         "electric_provider": "Holland board of public works",
         "gas_provider": "SEMCO Energy Gas Company",
+    },
+    "Traverse City": {
+        "counties": ("Grand Traverse County",),
+        "electric_provider": "Traverse city light & power",
+        "gas_provider": "DTE Gas Company",
+        "usage_sample": "grand_traverse_dedicated",
     },
 }
 REGION_OPTIONS = list(REGION_CONFIGS)
@@ -124,6 +134,7 @@ def calculate_county_cached(
     gas_tariff: str,
     period: str,
     propane_price: float,
+    usage_sample: str,
 ):
     data = load_all_data(signature)
     return calculate_county_scenario(
@@ -136,6 +147,7 @@ def calculate_county_cached(
         gas_tariff=gas_tariff,
         period=period,
         propane_price_per_gallon=propane_price,
+        usage_sample=usage_sample,
     )
 
 
@@ -284,7 +296,10 @@ def provider_for_counties(
     return values[0]
 
 
-def region_settings(data, region_label: str) -> tuple[tuple[str, ...], str, str]:
+def region_settings(
+    data,
+    region_label: str,
+) -> tuple[tuple[str, ...], str, str, str]:
     config = REGION_CONFIGS[region_label]
     counties = tuple(str(value) for value in config["counties"])
     electric_provider = str(
@@ -295,7 +310,19 @@ def region_settings(data, region_label: str) -> tuple[tuple[str, ...], str, str]
         config.get("gas_provider")
         or provider_for_counties(data, counties, "gas_provd")
     )
-    return counties, electric_provider, gas_provider
+    usage_sample = str(config.get("usage_sample", "mapped"))
+    return counties, electric_provider, gas_provider, usage_sample
+
+
+def region_sample_count(data, usage_sample: str, counties: tuple[str, ...]) -> int:
+    if usage_sample == "grand_traverse_dedicated":
+        return int(data.gt_electricity_usage["bldg_id"].nunique())
+    return int(
+        data.provider_map["in.county_name"]
+        .astype(str)
+        .isin(counties)
+        .sum()
+    )
 
 
 st.set_page_config(
@@ -304,7 +331,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("Residential Water-Heater Energy Cost Calculator — v4.1")
+st.title("Residential Water-Heater Energy Cost Calculator — v4.3")
 st.caption(
     "HPWH, natural gas, propane, and electric resistance scenarios. "
     "All costs are variable energy charges only; fixed customer charges, taxes, "
@@ -375,9 +402,12 @@ with st.sidebar:
         )
 
         try:
-            sample_counties, electric_provider, gas_provider = region_settings(
-                data, selected_region
-            )
+            (
+                sample_counties,
+                electric_provider,
+                gas_provider,
+                usage_sample,
+            ) = region_settings(data, selected_region)
             electric_tariffs = available_electric_tariffs(
                 data, electric_provider, selected_region_period
             )
@@ -418,11 +448,8 @@ with st.sidebar:
             key="region_propane_price_input",
         )
 
-        sample_count = int(
-            data.provider_map["in.county_name"]
-            .astype(str)
-            .isin(sample_counties)
-            .sum()
+        sample_count = region_sample_count(
+            data, usage_sample, sample_counties
         )
         st.caption(
             f"Sample counties: {', '.join(sample_counties)} · "
@@ -437,6 +464,7 @@ with st.sidebar:
             "electric_tariff": electric_tariffs[0],
             "gas_provider": gas_provider,
             "gas_tariff": gas_tariffs[0],
+            "usage_sample": usage_sample,
             "propane_price": float(DEFAULT_PROPANE_PRICE_PER_GALLON),
         }
         st.session_state.setdefault("applied_region", default_region_applied)
@@ -450,6 +478,7 @@ with st.sidebar:
                 "electric_tariff": selected_electric_tariff,
                 "gas_provider": gas_provider,
                 "gas_tariff": selected_gas_tariff,
+                "usage_sample": usage_sample,
                 "propane_price": float(selected_region_propane_price),
             }
 
@@ -526,6 +555,12 @@ else:
             applied["gas_tariff"],
             applied["period"],
             float(applied["propane_price"]),
+            applied.get(
+                "usage_sample",
+                REGION_CONFIGS.get(applied["region"], {}).get(
+                    "usage_sample", "mapped"
+                ),
+            ),
         )
 
     st.subheader(
@@ -540,6 +575,11 @@ else:
         f"Gas: {result.gas_provider} / {tariff_name(result.gas_tariff)} · "
         f"Propane: ${float(applied['propane_price']):.3f}/gallon"
     )
+    if result.usage_sample == "grand_traverse_dedicated":
+        st.caption(
+            f"Usage source: dedicated Grand Traverse sample — "
+            f"{len(result.households)} paired HPWH and natural-gas households."
+        )
 
     first_1, first_2, first_3 = st.columns(3)
     show_summary_card(
@@ -573,9 +613,11 @@ else:
 
     st.caption(
         "The selected electricity and gas tariffs are applied to every sampled "
-        "household in the selected county or multi-county area. For Holland, "
-        "Ottawa and Allegan County sample households are pooled and the Holland "
-        "Board of Public Works and SEMCO tariffs are applied as a scenario."
+        "household in the selected county or multi-county area. Holland pools "
+        "Ottawa and Allegan County households and applies Holland Board of Public "
+        "Works and SEMCO tariffs. Traverse City uses the separate 75-household "
+        "Grand Traverse sample and applies Traverse City Light & Power and DTE "
+        "Gas tariffs."
     )
 
     if len(result.households) < 10:
