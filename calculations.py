@@ -1,829 +1,1098 @@
 from __future__ import annotations
 
-import calendar
-from dataclasses import dataclass
+from pathlib import Path
 
-import numpy as np
 import pandas as pd
+import streamlit as st
 
-from data_loading import CalculatorData, RATE_HOUR_COLUMNS, USAGE_HOUR_COLUMNS
-
-
-PERIOD_MONTH = {"1": 1, "8": 8}
-SUPPORTED_PERIODS = {"1", "8", "year"}
-
-GAS_WH_EFFICIENCY = 0.62
-PROPANE_WH_EFFICIENCY = 0.62
-RESISTANCE_WH_EFFICIENCY = 0.95
-PROPANE_KWH_PER_GALLON = 91_452.0 / 3_412.0
-DEFAULT_PROPANE_PRICE_PER_GALLON = 2.370
-
-
-@dataclass(frozen=True)
-class StatewideResult:
-    household_summary: pd.DataFrame
-    hpwh_tariff_costs: pd.DataFrame
-    resistance_tariff_costs: pd.DataFrame
-    gas_households: pd.DataFrame
-    paired_households: pd.DataFrame
-    hpwh_summary: dict[str, float | int]
-    gas_summary: dict[str, float | int]
-    propane_summary: dict[str, float | int]
-    resistance_summary: dict[str, float | int]
-    hpwh_minus_gas_summary: dict[str, float | int]
-    interval_95: dict[str, dict[str, float | int]]
-    hourly_average_rates: pd.DataFrame
-    hourly_average_usage: pd.DataFrame
-    missing_electric: pd.DataFrame
-    missing_gas: pd.DataFrame
-
-
-@dataclass(frozen=True)
-class CountyScenarioResult:
-    households: pd.DataFrame
-    hpwh_summary: dict[str, float | int]
-    gas_summary: dict[str, float | int]
-    propane_summary: dict[str, float | int]
-    resistance_summary: dict[str, float | int]
-    hpwh_minus_gas_summary: dict[str, float | int]
-    geography_label: str
-    sample_counties: tuple[str, ...]
-    electric_provider: str
-    gas_provider: str
-    electric_tariff: str
-    gas_tariff: str
-    electric_year: int
-    gas_year: int
-    usage_sample: str
+from calculations import (
+    DEFAULT_PROPANE_PRICE_PER_GALLON,
+    GAS_WH_EFFICIENCY,
+    PROPANE_KWH_PER_GALLON,
+    PROPANE_WH_EFFICIENCY,
+    RESISTANCE_WH_EFFICIENCY,
+    SpaceHeatingResult,
+    StatewideResult,
+    available_electric_tariffs,
+    available_gas_tariffs,
+    calculate_county_scenario,
+    calculate_space_heating_scenario,
+    calculate_statewide,
+)
+from data_loading import (
+    ELECTRICITY_RATE_FILE,
+    ELECTRICITY_USAGE_FILE,
+    GAS_RATE_FILE,
+    GAS_USAGE_FILE,
+    GT_ELECTRICITY_USAGE_FILE,
+    GT_GAS_USAGE_FILE,
+    GT_SPACE_ELECTRICITY_USAGE_FILE,
+    GT_SPACE_GAS_USAGE_FILE,
+    PROFILE_LABELS,
+    PROVIDER_FILE,
+    RATE_HOUR_COLUMNS,
+    TARIFF_LABELS,
+    USAGE_HOUR_COLUMNS,
+    load_calculator_data,
+)
 
 
-def _summary(values: pd.Series | np.ndarray) -> dict[str, float | int]:
-    clean = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
-    if clean.empty:
-        return {"min": np.nan, "max": np.nan, "mean": np.nan, "n": 0}
-    return {
-        "min": float(clean.min()),
-        "max": float(clean.max()),
-        "mean": float(clean.mean()),
-        "n": int(clean.size),
-    }
+ROOT = Path(__file__).resolve().parent
+REQUIRED_FILES = [
+    ELECTRICITY_USAGE_FILE,
+    GAS_USAGE_FILE,
+    GT_ELECTRICITY_USAGE_FILE,
+    GT_GAS_USAGE_FILE,
+    GT_SPACE_ELECTRICITY_USAGE_FILE,
+    GT_SPACE_GAS_USAGE_FILE,
+    PROVIDER_FILE,
+    ELECTRICITY_RATE_FILE,
+    GAS_RATE_FILE,
+]
+PERIOD_OPTIONS = {
+    "1": "January",
+    "8": "August",
+    "year": "Annual average",
+}
+REGION_CONFIGS = {
+    "Wayne County": {
+        "counties": ("Wayne County",),
+    },
+    "Kent County": {
+        "counties": ("Kent County",),
+    },
+    "Washtenaw County": {
+        "counties": ("Washtenaw County",),
+    },
+    "Holland": {
+        "counties": ("Ottawa County", "Allegan County"),
+        "electric_provider": "Holland board of public works",
+        "gas_provider": "SEMCO Energy Gas Company",
+    },
+    "Traverse City": {
+        "counties": ("Grand Traverse County",),
+        "electric_provider": "Traverse city light & power",
+        "gas_provider": "DTE Gas Company",
+        "usage_sample": "grand_traverse_dedicated",
+    },
+}
+REGION_OPTIONS = list(REGION_CONFIGS)
+
+SPACE_HEATING_REGION_CONFIGS = {
+    "Traverse City": {
+        "counties": ("Grand Traverse County",),
+        "electric_provider": "Traverse city light & power",
+        "gas_provider": "DTE Gas Company",
+    },
+}
+SPACE_HEATING_REGION_OPTIONS = list(SPACE_HEATING_REGION_CONFIGS)
 
 
-def _household_tariff_summary(
-    frame: pd.DataFrame,
-    cost_column: str,
-    prefix: str,
+def tariff_name(value: object) -> str:
+    text = str(value)
+    if text == "-":
+        return "Standard Rate"
+    label = TARIFF_LABELS.get(text, text)
+    return f"{label} ({text})" if label != text else text
+
+
+def money(value: float) -> str:
+    if pd.isna(value):
+        return "N/A"
+    numeric = float(value)
+    return f"-${abs(numeric):,.2f}" if numeric < 0 else f"${numeric:,.2f}"
+
+
+
+MONTH_NAMES = {
+    1: "January",
+    2: "February",
+    3: "March",
+    4: "April",
+    5: "May",
+    6: "June",
+    7: "July",
+    8: "August",
+    9: "September",
+    10: "October",
+    11: "November",
+    12: "December",
+}
+
+
+def _hour_display_label(hour: int) -> str:
+    normalized = int(hour) % 24
+    suffix = "AM" if normalized < 12 else "PM"
+    clock_hour = normalized % 12 or 12
+    return f"{clock_hour} {suffix}"
+
+
+def traverse_city_hourly_rate_table(
+    data,
+    tariff: str,
 ) -> pd.DataFrame:
-    if frame.empty:
-        return pd.DataFrame()
+    provider = "Traverse city light & power"
 
-    records: list[dict[str, object]] = []
-    for building_id, group in frame.groupby("bldg_id", sort=False):
-        min_index = group[cost_column].idxmin()
-        max_index = group[cost_column].idxmax()
-        first = group.iloc[0]
-        records.append(
-            {
-                "bldg_id": str(building_id),
-                "county": first["county"],
-                "electric_provider": first["electric_provider"],
-                f"{prefix}_tariff_count": int(len(group)),
-                f"{prefix}_min": float(group[cost_column].min()),
-                f"{prefix}_min_tariff": group.loc[min_index, "electric_tariff"],
-                f"{prefix}_max": float(group[cost_column].max()),
-                f"{prefix}_max_tariff": group.loc[max_index, "electric_tariff"],
-                f"{prefix}_average": float(group[cost_column].mean()),
-            }
-        )
-    return pd.DataFrame(records)
-
-
-def _electric_summary(
-    household_frame: pd.DataFrame,
-    prefix: str,
-) -> dict[str, float | int]:
-    if household_frame.empty:
-        return _summary(pd.Series(dtype=float))
-    return {
-        "min": float(household_frame[f"{prefix}_min"].min()),
-        "max": float(household_frame[f"{prefix}_max"].max()),
-        "mean": float(household_frame[f"{prefix}_average"].mean()),
-        "n": int(len(household_frame)),
-    }
-
-
-def _period_multiplier(year: int, period: str) -> float:
-    if period in PERIOD_MONTH:
-        return float(calendar.monthrange(year, PERIOD_MONTH[period])[1])
-    return float(
-        sum(calendar.monthrange(year, month)[1] for month in range(1, 13))
-        / 12.0
-    )
-
-
-def _usage_profile(
-    usage: pd.DataFrame,
-    period: str,
-    prefix: str,
-) -> pd.DataFrame:
-    selected = usage.loc[
-        usage["season"].astype(str) == str(period),
-        ["bldg_id", *USAGE_HOUR_COLUMNS],
+    rates = data.electricity_rates.loc[
+        (data.electricity_rates["elec_provd"].astype(str) == provider)
+        & (data.electricity_rates["tariff"].astype(str) == str(tariff)),
+        ["month", *RATE_HOUR_COLUMNS],
     ].copy()
-    selected["bldg_id"] = selected["bldg_id"].astype(str)
-    selected = selected.rename(
-        columns={column: f"{prefix}_{hour:02d}" for hour, column in enumerate(USAGE_HOUR_COLUMNS)}
-    )
-    return selected
 
-
-def _houses_with_profiles(data: CalculatorData, period: str) -> pd.DataFrame:
-    electric = _usage_profile(data.electricity_usage, period, "hpwh")
-    gas = _usage_profile(data.gas_usage, period, "gas")
-    houses = (
-        data.provider_map.copy()
-        .assign(bldg_id=lambda frame: frame["bldg_id"].astype(str))
-        .merge(electric, on="bldg_id", how="left", validate="one_to_one")
-        .merge(gas, on="bldg_id", how="left", validate="one_to_one")
-    )
-    return houses
-
-
-def _dedicated_houses_with_profiles(
-    electricity_usage: pd.DataFrame,
-    gas_usage: pd.DataFrame,
-    period: str,
-    county_label: str,
-) -> pd.DataFrame:
-    electric = _usage_profile(electricity_usage, period, "hpwh")
-    gas = _usage_profile(gas_usage, period, "gas")
-    houses = electric.merge(
-        gas,
-        on="bldg_id",
-        how="inner",
-        validate="one_to_one",
-    )
-    houses.insert(1, "in.county_name", str(county_label))
-    return houses
-
-
-def _latest_complete_electric_scenarios(
-    rates: pd.DataFrame,
-    period: str,
-) -> pd.DataFrame:
-    """Create one reusable 24-hour cost vector per provider/tariff."""
-    records: list[dict[str, object]] = []
-
-    for (provider, tariff), group in rates.groupby(
-        ["elec_provd", "tariff"], sort=False
-    ):
-        chosen_year: int | None = None
-        chosen_group: pd.DataFrame | None = None
-
-        if period in PERIOD_MONTH:
-            month = PERIOD_MONTH[period]
-            eligible = group[group["month"].astype(int) == month]
-            if not eligible.empty:
-                chosen_year = int(eligible["year"].max())
-                chosen_group = eligible[eligible["year"].astype(int) == chosen_year]
-                if len(chosen_group) != 1:
-                    chosen_group = None
-        else:
-            valid_years = [
-                int(year)
-                for year, year_group in group.groupby("year")
-                if set(year_group["month"].astype(int)) >= set(range(1, 13))
-            ]
-            if valid_years:
-                chosen_year = max(valid_years)
-                chosen_group = group[
-                    (group["year"].astype(int) == chosen_year)
-                    & (group["month"].astype(int).isin(range(1, 13)))
-                ].copy()
-                if len(chosen_group) != 12:
-                    chosen_group = None
-
-        if chosen_group is None or chosen_year is None:
-            continue
-
-        if period in PERIOD_MONTH:
-            month = PERIOD_MONTH[period]
-            rate_vector = chosen_group.iloc[0][RATE_HOUR_COLUMNS].astype(float).to_numpy()
-            days = calendar.monthrange(chosen_year, month)[1]
-            cost_factor = days * rate_vector
-            display_rate = rate_vector
-        else:
-            cost_factor = np.zeros(24, dtype=float)
-            weighted_rate = np.zeros(24, dtype=float)
-            annual_days = 0
-            for month in range(1, 13):
-                row = chosen_group[chosen_group["month"].astype(int) == month]
-                if len(row) != 1:
-                    raise ValueError(
-                        f"Incomplete annual tariff: {provider} / {tariff} / {chosen_year}."
-                    )
-                days = calendar.monthrange(chosen_year, month)[1]
-                rate_vector = row.iloc[0][RATE_HOUR_COLUMNS].astype(float).to_numpy()
-                cost_factor += days * rate_vector / 12.0
-                weighted_rate += days * rate_vector
-                annual_days += days
-            display_rate = weighted_rate / annual_days
-
-        record: dict[str, object] = {
-            "electric_provider": str(provider),
-            "electric_tariff": str(tariff),
-            "electric_year": int(chosen_year),
-        }
-        record.update({f"factor_{hour:02d}": float(cost_factor[hour]) for hour in range(24)})
-        record.update({f"rate_{hour:02d}": float(display_rate[hour]) for hour in range(24)})
-        records.append(record)
-
-    return pd.DataFrame(records)
-
-
-def _latest_gas_scenarios(
-    rates: pd.DataFrame,
-    period: str,
-) -> pd.DataFrame:
-    records: list[dict[str, object]] = []
-    for (provider, tariff), group in rates.groupby(["gas_provd", "tariff"], sort=False):
-        year = int(group["year"].max())
-        chosen = group[group["year"].astype(int) == year].copy()
-        if "source_order" in chosen.columns:
-            chosen = chosen.sort_values("source_order", kind="stable")
-        row = chosen.iloc[0]
-        rate_vector = row[RATE_HOUR_COLUMNS].astype(float).to_numpy()
-        multiplier = _period_multiplier(year, period)
-        record: dict[str, object] = {
-            "gas_provider": str(provider),
-            "gas_tariff": str(tariff),
-            "gas_year": year,
-        }
-        record.update({f"factor_{hour:02d}": float(multiplier * rate_vector[hour]) for hour in range(24)})
-        record.update({f"rate_{hour:02d}": float(rate_vector[hour]) for hour in range(24)})
-        records.append(record)
-    return pd.DataFrame(records)
-
-
-def available_electric_tariffs(
-    data: CalculatorData,
-    provider: str,
-    period: str,
-) -> list[str]:
-    scenarios = _latest_complete_electric_scenarios(data.electricity_rates, period)
-    return sorted(
-        scenarios.loc[
-            scenarios["electric_provider"].astype(str) == str(provider),
-            "electric_tariff",
-        ].astype(str).unique().tolist()
-    )
-
-
-def available_gas_tariffs(data: CalculatorData, provider: str) -> list[str]:
-    return sorted(
-        data.gas_rates.loc[
-            data.gas_rates["gas_provd"].astype(str) == str(provider),
-            "tariff",
-        ].astype(str).unique().tolist()
-    )
-
-
-def _technology_tariff_costs(
-    houses: pd.DataFrame,
-    scenarios: pd.DataFrame,
-    usage_columns: list[str],
-    cost_column: str,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Calculate all mapped electricity tariffs with vectorized matrix products."""
-    long_frames: list[pd.DataFrame] = []
-    missing: list[dict[str, object]] = []
-    house_rate_vectors: list[np.ndarray] = []
-
-    factor_columns = [f"factor_{hour:02d}" for hour in range(24)]
-    rate_columns = [f"rate_{hour:02d}" for hour in range(24)]
-
-    for provider, provider_houses in houses.groupby("elec_provd", sort=False):
-        provider_scenarios = scenarios[
-            scenarios["electric_provider"].astype(str) == str(provider)
-        ].copy()
-
-        if provider_scenarios.empty:
-            for _, house in provider_houses.iterrows():
-                missing.append(
-                    {
-                        "bldg_id": str(house["bldg_id"]),
-                        "county": house["in.county_name"],
-                        "electric_provider": provider,
-                        "reason": "No complete applicable electricity tariff",
-                    }
-                )
-            continue
-
-        usage_matrix = provider_houses[usage_columns].astype(float).to_numpy()
-        factor_matrix = provider_scenarios[factor_columns].astype(float).to_numpy()
-        cost_matrix = usage_matrix @ factor_matrix.T
-
-        n_houses = len(provider_houses)
-        n_scenarios = len(provider_scenarios)
-        frame = pd.DataFrame(
-            {
-                "bldg_id": np.repeat(provider_houses["bldg_id"].astype(str).to_numpy(), n_scenarios),
-                "county": np.repeat(provider_houses["in.county_name"].astype(str).to_numpy(), n_scenarios),
-                "electric_provider": np.repeat(str(provider), n_houses * n_scenarios),
-                "electric_tariff": np.tile(provider_scenarios["electric_tariff"].astype(str).to_numpy(), n_houses),
-                "electric_year": np.tile(provider_scenarios["electric_year"].astype(int).to_numpy(), n_houses),
-                cost_column: cost_matrix.reshape(-1),
-            }
+    if rates.empty:
+        raise ValueError(
+            f"No electricity-rate rows were found for {provider} / {tariff}."
         )
-        long_frames.append(frame)
 
-        mean_rate = provider_scenarios[rate_columns].astype(float).to_numpy().mean(axis=0)
-        house_rate_vectors.extend([mean_rate] * n_houses)
+    rates["month"] = pd.to_numeric(
+        rates["month"],
+        errors="raise",
+    ).astype(int)
 
-    long_frame = pd.concat(long_frames, ignore_index=True) if long_frames else pd.DataFrame()
-    missing_frame = pd.DataFrame(missing)
-    rate_frame = pd.DataFrame(house_rate_vectors, columns=[f"hour_{hour:02d}" for hour in range(24)])
-    return long_frame, missing_frame, rate_frame
+    # Identical duplicate rows are harmless, but conflicting rate rows for
+    # the same month must not be silently displayed or used.
+    rates = rates.drop_duplicates()
+    duplicate_months = rates.loc[
+        rates.duplicated(subset=["month"], keep=False),
+        "month",
+    ].sort_values()
 
+    if not duplicate_months.empty:
+        months = ", ".join(
+            str(month)
+            for month in duplicate_months.unique()
+        )
+        raise ValueError(
+            f"{provider} / {tariff} contains conflicting rate profiles "
+            f"for month(s): {months}."
+        )
 
-def _gas_household_costs(
-    houses: pd.DataFrame,
-    scenarios: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    records: list[pd.DataFrame] = []
-    missing: list[dict[str, object]] = []
-    house_rate_vectors: list[np.ndarray] = []
-    factor_columns = [f"factor_{hour:02d}" for hour in range(24)]
-    rate_columns = [f"rate_{hour:02d}" for hour in range(24)]
-    gas_columns = [f"gas_{hour:02d}" for hour in range(24)]
+    expected_months = list(range(1, 13))
+    actual_months = sorted(rates["month"].tolist())
+    if actual_months != expected_months:
+        raise ValueError(
+            f"{provider} / {tariff} must contain exactly one row for "
+            "each month from January through December."
+        )
 
-    for provider, provider_houses in houses.groupby("gas_provd", sort=False):
-        provider_scenarios = scenarios[
-            scenarios["gas_provider"].astype(str) == str(provider)
-        ].copy()
-        if provider_scenarios.empty:
-            for _, house in provider_houses.iterrows():
-                missing.append(
-                    {
-                        "bldg_id": str(house["bldg_id"]),
-                        "county": house["in.county_name"],
-                        "gas_provider": provider,
-                        "reason": "No gas tariff",
-                    }
-                )
-            continue
+    rates = rates.sort_values("month").reset_index(drop=True)
 
-        # Statewide logic retains one latest mapped gas tariff per provider.
-        scenario = provider_scenarios.sort_values(
-            ["gas_year", "gas_tariff"], kind="stable"
-        ).iloc[-1]
-        usage_matrix = provider_houses[gas_columns].astype(float).to_numpy()
-        factor_vector = scenario[factor_columns].astype(float).to_numpy()
-        costs = usage_matrix @ factor_vector
+    table = pd.DataFrame(
+        {
+            "Month": rates["month"].map(MONTH_NAMES),
+        }
+    )
 
-        frame = provider_houses[["bldg_id", "in.county_name"]].copy()
-        frame = frame.rename(columns={"in.county_name": "county"})
-        frame["bldg_id"] = frame["bldg_id"].astype(str)
-        frame["gas_provider"] = str(provider)
-        frame["gas_tariff"] = str(scenario["gas_tariff"])
-        frame["gas_year"] = int(scenario["gas_year"])
-        frame["gas_monthly_cost"] = costs
-        records.append(frame)
+    for hour, rate_column in enumerate(RATE_HOUR_COLUMNS):
+        table[_hour_display_label(hour)] = rates[rate_column].map(
+            lambda value: f"${float(value):.5f}"
+        )
 
-        rate_vector = scenario[rate_columns].astype(float).to_numpy()
-        house_rate_vectors.extend([rate_vector] * len(provider_houses))
-
-    cost_frame = pd.concat(records, ignore_index=True) if records else pd.DataFrame()
-    missing_frame = pd.DataFrame(missing)
-    rate_frame = pd.DataFrame(house_rate_vectors, columns=[f"hour_{hour:02d}" for hour in range(24)])
-    return cost_frame, missing_frame, rate_frame
+    return table
 
 
-def _central_95_ids(frame: pd.DataFrame, usage_column: str) -> set[str]:
-    clean = frame[["bldg_id", usage_column]].dropna().copy()
-    if clean.empty:
-        return set()
-    lower = float(clean[usage_column].quantile(0.025))
-    upper = float(clean[usage_column].quantile(0.975))
-    return set(
-        clean.loc[
-            clean[usage_column].between(lower, upper, inclusive="both"),
-            "bldg_id",
-        ].astype(str)
+def show_traverse_city_rate_tables(
+    data,
+    selected_tariff: str,
+) -> None:
+    st.markdown(
+        "#### Traverse City Light & Power — monthly hourly rate tables"
+    )
+
+    for tariff in ["Phase In", "Phase Out"]:
+        selected_label = (
+            " — Selected for this calculation"
+            if tariff == str(selected_tariff)
+            else ""
+        )
+        st.markdown(f"**{tariff}{selected_label}**")
+        st.dataframe(
+            traverse_city_hourly_rate_table(data, tariff),
+            use_container_width=True,
+            hide_index=True,
+            height=455,
+        )
+
+    st.caption(
+        "Each table shows the variable electricity rate for all 24 hours "
+        "of every month. Rates are displayed in $/kWh and are read directly "
+        "from electricity_rates_weekdays_202607.xlsx."
     )
 
 
-def _interval_mean(
-    frame: pd.DataFrame,
-    ids: set[str],
-    value_column: str,
-) -> dict[str, float | int]:
-    selected = frame[frame["bldg_id"].astype(str).isin(ids)]
-    values = pd.to_numeric(selected[value_column], errors="coerce").dropna()
-    return {
-        "mean": float(values.mean()) if not values.empty else np.nan,
-        "n": int(values.size),
-    }
+
+def _data_file_path(filename: str) -> Path:
+    root_path = ROOT / filename
+    data_path = ROOT / "data" / filename
+    if root_path.exists():
+        return root_path
+    return data_path
 
 
-def calculate_statewide(
-    data: CalculatorData,
+def data_signature() -> tuple[tuple[str, int, int], ...]:
+    signature: list[tuple[str, int, int]] = []
+    for filename in REQUIRED_FILES:
+        path = _data_file_path(filename)
+        if not path.exists():
+            signature.append((filename, -1, -1))
+        else:
+            stat = path.stat()
+            signature.append((filename, int(stat.st_mtime_ns), int(stat.st_size)))
+    return tuple(signature)
+
+
+@st.cache_data(show_spinner="Loading and validating input data...")
+def load_all_data(signature: tuple[tuple[str, int, int], ...]):
+    _ = signature
+    return load_calculator_data()
+
+
+@st.cache_data(show_spinner=False)
+def calculate_statewide_cached(
+    signature: tuple[tuple[str, int, int], ...],
     period: str,
-    propane_price_per_gallon: float = DEFAULT_PROPANE_PRICE_PER_GALLON,
+    propane_price: float,
 ) -> StatewideResult:
-    if period not in SUPPORTED_PERIODS:
-        raise ValueError(f"Unsupported period: {period}")
-    if propane_price_per_gallon < 0:
-        raise ValueError("Propane price cannot be negative.")
-
-    houses = _houses_with_profiles(data, period)
-    hpwh_columns = [f"hpwh_{hour:02d}" for hour in range(24)]
-    gas_columns = [f"gas_{hour:02d}" for hour in range(24)]
-
-    houses["hpwh_daily_use_kwh"] = houses[hpwh_columns].sum(axis=1)
-    houses["gas_input_daily_use_kwh"] = houses[gas_columns].sum(axis=1)
-    houses["resistance_daily_use_kwh"] = (
-        houses["gas_input_daily_use_kwh"]
-        * GAS_WH_EFFICIENCY
-        / RESISTANCE_WH_EFFICIENCY
-    )
-    houses["propane_input_daily_kwh"] = (
-        houses["gas_input_daily_use_kwh"]
-        * GAS_WH_EFFICIENCY
-        / PROPANE_WH_EFFICIENCY
-    )
-
-    electric_scenarios = _latest_complete_electric_scenarios(
-        data.electricity_rates, period
-    )
-    gas_scenarios = _latest_gas_scenarios(data.gas_rates, period)
-
-    hpwh_costs, missing_electric, hpwh_rate_rows = _technology_tariff_costs(
-        houses,
-        electric_scenarios,
-        hpwh_columns,
-        "hpwh_monthly_cost",
-    )
-
-    resistance_houses = houses.copy()
-    resistance_columns = [f"resistance_{hour:02d}" for hour in range(24)]
-    resistance_ratio = GAS_WH_EFFICIENCY / RESISTANCE_WH_EFFICIENCY
-    for hour, column in enumerate(gas_columns):
-        resistance_houses[resistance_columns[hour]] = (
-            resistance_houses[column].astype(float) * resistance_ratio
-        )
-
-    resistance_costs, _, resistance_rate_rows = _technology_tariff_costs(
-        resistance_houses,
-        electric_scenarios,
-        resistance_columns,
-        "resistance_monthly_cost",
-    )
-
-    gas_costs, missing_gas, gas_rate_rows = _gas_household_costs(
-        houses, gas_scenarios
-    )
-
-    hpwh_house = _household_tariff_summary(
-        hpwh_costs, "hpwh_monthly_cost", "hpwh"
-    )
-    resistance_house = _household_tariff_summary(
-        resistance_costs, "resistance_monthly_cost", "resistance"
-    )
-
-    propane_year = 2026
-    propane_multiplier = _period_multiplier(propane_year, period)
-    propane_frame = houses[
-        ["bldg_id", "in.county_name", "propane_input_daily_kwh"]
-    ].copy()
-    propane_frame = propane_frame.rename(columns={"in.county_name": "county"})
-    propane_frame["bldg_id"] = propane_frame["bldg_id"].astype(str)
-    propane_frame["propane_price_per_gallon"] = float(propane_price_per_gallon)
-    propane_frame["propane_daily_gallons"] = (
-        propane_frame["propane_input_daily_kwh"] / PROPANE_KWH_PER_GALLON
-    )
-    propane_frame["propane_monthly_cost"] = (
-        propane_frame["propane_daily_gallons"]
-        * propane_multiplier
-        * float(propane_price_per_gallon)
-    )
-
-    base = houses[
-        [
-            "bldg_id",
-            "in.county_name",
-            "elec_provd",
-            "gas_provd",
-            "hpwh_daily_use_kwh",
-            "gas_input_daily_use_kwh",
-            "resistance_daily_use_kwh",
-            "propane_input_daily_kwh",
-        ]
-    ].copy()
-    base = base.rename(
-        columns={
-            "in.county_name": "county",
-            "elec_provd": "electric_provider",
-            "gas_provd": "gas_provider",
-        }
-    )
-    base["bldg_id"] = base["bldg_id"].astype(str)
-
-    household_summary = (
-        base.merge(hpwh_house, on=["bldg_id", "county", "electric_provider"], how="left")
-        .merge(
-            resistance_house,
-            on=["bldg_id", "county", "electric_provider"],
-            how="left",
-        )
-        .merge(
-            gas_costs[
-                [
-                    "bldg_id",
-                    "county",
-                    "gas_tariff",
-                    "gas_year",
-                    "gas_monthly_cost",
-                ]
-            ],
-            on=["bldg_id", "county"],
-            how="left",
-        )
-        .merge(
-            propane_frame[
-                [
-                    "bldg_id",
-                    "county",
-                    "propane_price_per_gallon",
-                    "propane_daily_gallons",
-                    "propane_monthly_cost",
-                ]
-            ],
-            on=["bldg_id", "county"],
-            how="left",
-        )
-    )
-
-    paired = household_summary.dropna(
-        subset=["hpwh_average", "gas_monthly_cost"]
-    ).copy()
-    paired["hpwh_minus_gas_min"] = paired["hpwh_min"] - paired["gas_monthly_cost"]
-    paired["hpwh_minus_gas_max"] = paired["hpwh_max"] - paired["gas_monthly_cost"]
-    paired["hpwh_minus_gas_average"] = (
-        paired["hpwh_average"] - paired["gas_monthly_cost"]
-    )
-    paired["resistance_minus_gas_average"] = (
-        paired["resistance_average"] - paired["gas_monthly_cost"]
-    )
-    paired["propane_minus_gas"] = (
-        paired["propane_monthly_cost"] - paired["gas_monthly_cost"]
-    )
-
-    hpwh_summary = _electric_summary(hpwh_house, "hpwh")
-    resistance_summary = _electric_summary(resistance_house, "resistance")
-    gas_summary = _summary(gas_costs["gas_monthly_cost"])
-    propane_summary = _summary(propane_frame["propane_monthly_cost"])
-    hpwh_minus_gas_summary = {
-        "min": float(paired["hpwh_minus_gas_min"].min()),
-        "max": float(paired["hpwh_minus_gas_max"].max()),
-        "mean": float(paired["hpwh_minus_gas_average"].mean()),
-        "n": int(len(paired)),
-    }
-
-    hpwh_95_ids = _central_95_ids(base, "hpwh_daily_use_kwh")
-    gas_95_ids = _central_95_ids(base, "gas_input_daily_use_kwh")
-    paired_95_ids = hpwh_95_ids & gas_95_ids
-
-    interval_95 = {
-        "hpwh": _interval_mean(hpwh_house, hpwh_95_ids, "hpwh_average"),
-        "gas": _interval_mean(gas_costs, gas_95_ids, "gas_monthly_cost"),
-        "propane": _interval_mean(
-            propane_frame, gas_95_ids, "propane_monthly_cost"
-        ),
-        "resistance": _interval_mean(
-            resistance_house, gas_95_ids, "resistance_average"
-        ),
-        "hpwh_minus_gas": _interval_mean(
-            paired, paired_95_ids, "hpwh_minus_gas_average"
-        ),
-    }
-
-    # Equal-house weighting for rate charts. The technology shares the same
-    # electricity tariff set, so HPWH and resistance rate profiles are equal.
-    electric_rate_average = (
-        hpwh_rate_rows.mean(axis=0).to_numpy()
-        if not hpwh_rate_rows.empty
-        else np.repeat(np.nan, 24)
-    )
-    gas_rate_average = (
-        gas_rate_rows.mean(axis=0).to_numpy()
-        if not gas_rate_rows.empty
-        else np.repeat(np.nan, 24)
-    )
-    hourly_average_rates = pd.DataFrame(
-        {
-            "hour": range(24),
-            "electricity_rate": electric_rate_average,
-            "gas_rate": gas_rate_average,
-        }
-    )
-
-    hourly_average_usage = pd.DataFrame(
-        {
-            "hour": range(24),
-            "hpwh_kwh": houses[hpwh_columns].mean(axis=0).to_numpy(),
-            "gas_input_kwh": houses[gas_columns].mean(axis=0).to_numpy(),
-            "resistance_kwh": resistance_houses[resistance_columns]
-            .mean(axis=0)
-            .to_numpy(),
-        }
-    )
-
-    return StatewideResult(
-        household_summary=household_summary,
-        hpwh_tariff_costs=hpwh_costs,
-        resistance_tariff_costs=resistance_costs,
-        gas_households=gas_costs,
-        paired_households=paired,
-        hpwh_summary=hpwh_summary,
-        gas_summary=gas_summary,
-        propane_summary=propane_summary,
-        resistance_summary=resistance_summary,
-        hpwh_minus_gas_summary=hpwh_minus_gas_summary,
-        interval_95=interval_95,
-        hourly_average_rates=hourly_average_rates,
-        hourly_average_usage=hourly_average_usage,
-        missing_electric=missing_electric,
-        missing_gas=missing_gas,
-    )
+    data = load_all_data(signature)
+    return calculate_statewide(data, period, propane_price)
 
 
-def _selected_electric_scenario(
-    data: CalculatorData,
-    provider: str,
-    tariff: str,
-    period: str,
-) -> pd.Series:
-    scenarios = _latest_complete_electric_scenarios(data.electricity_rates, period)
-    selected = scenarios[
-        (scenarios["electric_provider"].astype(str) == str(provider))
-        & (scenarios["electric_tariff"].astype(str) == str(tariff))
-    ]
-    if len(selected) != 1:
-        raise ValueError(
-            f"Expected one electricity scenario for {provider} / {tariff} / {period}; "
-            f"found {len(selected)}."
-        )
-    return selected.iloc[0]
-
-
-def _selected_gas_scenario(
-    data: CalculatorData,
-    provider: str,
-    tariff: str,
-    period: str,
-) -> pd.Series:
-    scenarios = _latest_gas_scenarios(data.gas_rates, period)
-    selected = scenarios[
-        (scenarios["gas_provider"].astype(str) == str(provider))
-        & (scenarios["gas_tariff"].astype(str) == str(tariff))
-    ]
-    if len(selected) != 1:
-        raise ValueError(
-            f"Expected one gas scenario for {provider} / {tariff}; found {len(selected)}."
-        )
-    return selected.iloc[0]
-
-
-def calculate_county_scenario(
-    data: CalculatorData,
-    county: str | tuple[str, ...],
+@st.cache_data(show_spinner=False)
+def calculate_county_cached(
+    signature: tuple[tuple[str, int, int], ...],
+    geography_label: str,
+    sample_counties: tuple[str, ...],
     electric_provider: str,
     electric_tariff: str,
     gas_provider: str,
     gas_tariff: str,
     period: str,
-    propane_price_per_gallon: float = DEFAULT_PROPANE_PRICE_PER_GALLON,
-    geography_label: str | None = None,
-    usage_sample: str = "mapped",
-) -> CountyScenarioResult:
-    if period not in SUPPORTED_PERIODS:
-        raise ValueError(f"Unsupported period: {period}")
-    if propane_price_per_gallon < 0:
-        raise ValueError("Propane price cannot be negative.")
-
-    sample_counties = (county,) if isinstance(county, str) else tuple(county)
-    sample_counties = tuple(str(value) for value in sample_counties)
-    if not sample_counties:
-        raise ValueError("At least one sample county is required.")
-
-    label = geography_label or (
-        sample_counties[0]
-        if len(sample_counties) == 1
-        else " + ".join(sample_counties)
+    propane_price: float,
+    usage_sample: str,
+):
+    data = load_all_data(signature)
+    return calculate_county_scenario(
+        data=data,
+        county=sample_counties,
+        geography_label=geography_label,
+        electric_provider=electric_provider,
+        electric_tariff=electric_tariff,
+        gas_provider=gas_provider,
+        gas_tariff=gas_tariff,
+        period=period,
+        propane_price_per_gallon=propane_price,
+        usage_sample=usage_sample,
     )
 
-    if usage_sample == "mapped":
-        houses = _houses_with_profiles(data, period)
-        houses = houses[
-            houses["in.county_name"].astype(str).isin(sample_counties)
-        ].copy()
-        empty_message = "No mapped sample households"
-    elif usage_sample == "grand_traverse_dedicated":
-        if sample_counties != ("Grand Traverse County",):
-            raise ValueError(
-                "The Grand Traverse dedicated sample can only be used with "
-                "Grand Traverse County."
-            )
-        houses = _dedicated_houses_with_profiles(
-            data.gt_electricity_usage,
-            data.gt_gas_usage,
-            period,
-            "Grand Traverse County",
+
+@st.cache_data(show_spinner=False)
+def calculate_space_heating_cached(
+    signature: tuple[tuple[str, int, int], ...],
+    geography_label: str,
+    sample_counties: tuple[str, ...],
+    electric_provider: str,
+    electric_tariff: str,
+    gas_provider: str,
+    gas_tariff: str,
+    period: str,
+    propane_price: float,
+) -> SpaceHeatingResult:
+    data = load_all_data(signature)
+    return calculate_space_heating_scenario(
+        data=data,
+        county=sample_counties,
+        geography_label=geography_label,
+        electric_provider=electric_provider,
+        electric_tariff=electric_tariff,
+        gas_provider=gas_provider,
+        gas_tariff=gas_tariff,
+        period=period,
+        propane_price_per_gallon=propane_price,
+    )
+
+
+def show_summary_card(
+    column,
+    title: str,
+    summary: dict[str, float | int],
+    interval: dict[str, float | int] | None = None,
+) -> None:
+    column.metric(title, money(float(summary["mean"])))
+
+    # Markdown interprets HTML lines indented by four or more spaces as a
+    # code block. Build the markup without any leading indentation.
+    interval_html = ""
+    if interval is not None:
+        interval_html = (
+            '<div style="font-size:1.14rem;font-weight:750;'
+            'margin-bottom:0.32rem;color:inherit;">'
+            f'Interval 95%: {money(float(interval["mean"]))} '
+            '<span style="font-size:0.90rem;font-weight:600;color:inherit;">'
+            f'({int(interval["n"])} households)'
+            '</span>'
+            '</div>'
         )
-        empty_message = "No dedicated Grand Traverse sample households"
+
+    card_html = (
+        '<div style="margin-top:0.32rem;line-height:1.45;color:inherit;">'
+        f'{interval_html}'
+        '<div style="font-size:0.96rem;font-weight:500;'
+        'margin-bottom:0.16rem;color:inherit;">'
+        f'Range: {money(float(summary["min"]))} – '
+        f'{money(float(summary["max"]))}'
+        '</div>'
+        '<div style="font-size:0.96rem;font-weight:500;color:inherit;">'
+        f'Households: {int(summary["n"])}'
+        '</div>'
+        '</div>'
+    )
+    column.markdown(card_html, unsafe_allow_html=True)
+
+
+def add_house_number(frame: pd.DataFrame, data) -> pd.DataFrame:
+    order = data.provider_map[["bldg_id"]].copy()
+    order["bldg_id"] = order["bldg_id"].astype(str)
+    order["_sort"] = pd.to_numeric(order["bldg_id"], errors="coerce")
+    order = order.sort_values(["_sort", "bldg_id"], kind="stable").reset_index(drop=True)
+    order["House No."] = range(1, len(order) + 1)
+    mapping = dict(zip(order["bldg_id"], order["House No."]))
+
+    output = frame.copy()
+    output["bldg_id"] = output["bldg_id"].astype(str)
+    output.insert(0, "House No.", output["bldg_id"].map(mapping))
+    return output.sort_values(["House No.", "bldg_id"], kind="stable").reset_index(drop=True)
+
+
+def annual_hourly_table(data, household_summary: pd.DataFrame) -> pd.DataFrame:
+    electric = data.electricity_usage[
+        data.electricity_usage["season"].astype(str) == "year"
+    ][["bldg_id", *USAGE_HOUR_COLUMNS]].copy()
+    gas = data.gas_usage[
+        data.gas_usage["season"].astype(str) == "year"
+    ][["bldg_id", *USAGE_HOUR_COLUMNS]].copy()
+    electric["bldg_id"] = electric["bldg_id"].astype(str)
+    gas["bldg_id"] = gas["bldg_id"].astype(str)
+
+    electric_columns = [f"HPWH {hour:02d}:00 (kWh)" for hour in range(24)]
+    gas_columns = [f"Gas-WH {hour:02d}:00 (kWh)" for hour in range(24)]
+    electric = electric.rename(columns=dict(zip(USAGE_HOUR_COLUMNS, electric_columns)))
+    gas = gas.rename(columns=dict(zip(USAGE_HOUR_COLUMNS, gas_columns)))
+    electric["HPWH annual avg daily total (kWh)"] = electric[electric_columns].sum(axis=1)
+    gas["Gas-WH annual avg daily total (kWh)"] = gas[gas_columns].sum(axis=1)
+
+    base = household_summary[["bldg_id", "county"]].copy()
+    return (
+        base.merge(electric, on="bldg_id", how="left", validate="one_to_one")
+        .merge(gas, on="bldg_id", how="left", validate="one_to_one")
+    )
+
+
+def render_statewide_details(result: StatewideResult, data) -> None:
+    st.subheader("Detailed results")
+    table_choice = st.selectbox(
+        "Detail table",
+        [
+            "Household cost summary",
+            "HPWH tariff calculations",
+            "Electric resistance tariff calculations",
+            "Gas-water-heater calculations",
+            "Paired technology comparisons",
+            "Annual hourly energy use",
+        ],
+        key="statewide_detail_table",
+    )
+
+    if table_choice == "Household cost summary":
+        display = add_house_number(result.household_summary, data)
+    elif table_choice == "HPWH tariff calculations":
+        display = add_house_number(result.hpwh_tariff_costs, data)
+    elif table_choice == "Electric resistance tariff calculations":
+        display = add_house_number(result.resistance_tariff_costs, data)
+    elif table_choice == "Gas-water-heater calculations":
+        display = add_house_number(result.gas_households, data)
+    elif table_choice == "Paired technology comparisons":
+        display = add_house_number(result.paired_households, data)
     else:
-        raise ValueError(f"Unsupported usage sample: {usage_sample}")
+        display = add_house_number(annual_hourly_table(data, result.household_summary), data)
 
-    if houses.empty:
+    st.dataframe(display, use_container_width=True, hide_index=True, height=620)
+    st.download_button(
+        "Download displayed table as CSV",
+        display.to_csv(index=False).encode("utf-8"),
+        file_name=f"{table_choice.lower().replace(' ', '_')}.csv",
+        mime="text/csv",
+    )
+
+
+def render_statewide_charts(result: StatewideResult) -> None:
+    st.subheader("Average hourly profiles")
+    usage = result.hourly_average_usage.set_index("hour")
+    rates = result.hourly_average_rates.set_index("hour")
+
+    left, right = st.columns(2)
+    with left:
+        st.caption("Average energy use across the 149-household sample")
+        st.line_chart(usage, height=330)
+    with right:
+        st.caption("Equal-household average hourly variable rates")
+        st.line_chart(rates, height=330)
+
+
+def provider_for_counties(
+    data,
+    counties: tuple[str, ...],
+    column: str,
+) -> str:
+    values = sorted(
+        data.provider_map.loc[
+            data.provider_map["in.county_name"].astype(str).isin(counties),
+            column,
+        ].dropna().astype(str).unique().tolist()
+    )
+    if not values:
         raise ValueError(
-            f"{empty_message} were found for {label}: "
-            f"{', '.join(sample_counties)}."
+            f"No {column} mapping is available for {', '.join(counties)}."
+        )
+    return values[0]
+
+
+def region_settings(
+    data,
+    region_label: str,
+) -> tuple[tuple[str, ...], str, str, str]:
+    config = REGION_CONFIGS[region_label]
+    counties = tuple(str(value) for value in config["counties"])
+    electric_provider = str(
+        config.get("electric_provider")
+        or provider_for_counties(data, counties, "elec_provd")
+    )
+    gas_provider = str(
+        config.get("gas_provider")
+        or provider_for_counties(data, counties, "gas_provd")
+    )
+    usage_sample = str(config.get("usage_sample", "mapped"))
+    return counties, electric_provider, gas_provider, usage_sample
+
+
+def region_sample_count(data, usage_sample: str, counties: tuple[str, ...]) -> int:
+    if usage_sample == "grand_traverse_dedicated":
+        return int(data.gt_electricity_usage["bldg_id"].nunique())
+    return int(
+        data.provider_map["in.county_name"]
+        .astype(str)
+        .isin(counties)
+        .sum()
+    )
+
+
+st.set_page_config(
+    page_title="Residential energy cost calculator",
+    page_icon="🏠",
+    layout="wide",
+)
+
+st.title("Residential Water-Heating and Space-Heating Cost Calculator — v5.0")
+st.caption(
+    "Water-heating and space-heating technology scenarios. All costs are "
+    "variable energy charges only; fixed customer charges, taxes, installation, "
+    "and maintenance are not included."
+)
+
+signature = data_signature()
+try:
+    data = load_all_data(signature)
+except Exception as exc:
+    st.error(f"Failed to load or validate data: {exc}")
+    st.stop()
+
+
+# Applied settings are separate from the live widget values. Changing a widget
+# reruns only the light UI; the scenario changes after Calculate / Update.
+st.session_state.setdefault(
+    "applied_statewide",
+    {"period": "1", "propane_price": DEFAULT_PROPANE_PRICE_PER_GALLON},
+)
+
+with st.sidebar:
+    st.header("Input")
+    analysis_mode = st.radio(
+        "Analysis mode",
+        [
+            "All Michigan sample",
+            "County / area scenario",
+            "Space heating",
+        ],
+        key="analysis_mode",
+    )
+
+    if analysis_mode == "All Michigan sample":
+        selected_period = st.selectbox(
+            "Consumption profile",
+            list(PERIOD_OPTIONS),
+            format_func=lambda code: PERIOD_OPTIONS[code],
+            key="statewide_period_input",
+        )
+        selected_propane_price = st.number_input(
+            "Propane price ($/gallon)",
+            min_value=0.0,
+            value=float(DEFAULT_PROPANE_PRICE_PER_GALLON),
+            step=0.01,
+            format="%.3f",
+            key="statewide_propane_price_input",
+        )
+        if st.button(
+            "Calculate / Update",
+            type="primary",
+            use_container_width=True,
+            key="statewide_calculate_button",
+        ):
+            st.session_state["applied_statewide"] = {
+                "period": selected_period,
+                "propane_price": float(selected_propane_price),
+            }
+
+        applied = st.session_state["applied_statewide"]
+        st.caption(
+            f"Applied: {PERIOD_OPTIONS[applied['period']]} · "
+            f"Propane ${applied['propane_price']:.3f}/gal"
         )
 
-    # The selected utilities are applied to every sampled household in the
-    # chosen county or multi-county area. This intentionally permits a tariff
-    # scenario that differs from the provider mapping in the source workbook.
-    electric_scenario = _selected_electric_scenario(
-        data, electric_provider, electric_tariff, period
-    )
-    gas_scenario = _selected_gas_scenario(
-        data, gas_provider, gas_tariff, period
-    )
+    elif analysis_mode == "County / area scenario":
+        selected_region = st.selectbox(
+            "County / area",
+            REGION_OPTIONS,
+            key="region_input",
+        )
+        selected_region_period = st.selectbox(
+            "Period",
+            list(PERIOD_OPTIONS),
+            format_func=lambda code: PERIOD_OPTIONS[code],
+            key="region_period_input",
+        )
 
-    hpwh_columns = [f"hpwh_{hour:02d}" for hour in range(24)]
-    gas_columns = [f"gas_{hour:02d}" for hour in range(24)]
-    factor_columns = [f"factor_{hour:02d}" for hour in range(24)]
+        try:
+            (
+                sample_counties,
+                electric_provider,
+                gas_provider,
+                usage_sample,
+            ) = region_settings(data, selected_region)
+            electric_tariffs = available_electric_tariffs(
+                data,
+                electric_provider,
+                selected_region_period,
+            )
+            gas_tariffs = available_gas_tariffs(data, gas_provider)
+        except Exception as exc:
+            st.error(str(exc))
+            st.stop()
 
-    hpwh_matrix = houses[hpwh_columns].astype(float).to_numpy()
-    gas_matrix = houses[gas_columns].astype(float).to_numpy()
-    resistance_matrix = gas_matrix * GAS_WH_EFFICIENCY / RESISTANCE_WH_EFFICIENCY
+        if not electric_tariffs or not gas_tariffs:
+            st.error("No complete tariff is available for the selected scenario.")
+            st.stop()
 
-    electric_factor = electric_scenario[factor_columns].astype(float).to_numpy()
-    gas_factor = gas_scenario[factor_columns].astype(float).to_numpy()
+        current_electric = st.session_state.get("region_electric_tariff_input")
+        if current_electric not in electric_tariffs:
+            st.session_state["region_electric_tariff_input"] = electric_tariffs[0]
+        current_gas = st.session_state.get("region_gas_tariff_input")
+        if current_gas not in gas_tariffs:
+            st.session_state["region_gas_tariff_input"] = gas_tariffs[0]
 
-    hpwh_cost = hpwh_matrix @ electric_factor
-    resistance_cost = resistance_matrix @ electric_factor
-    gas_cost = gas_matrix @ gas_factor
+        selected_electric_tariff = st.selectbox(
+            f"Electricity tariff — {electric_provider}",
+            electric_tariffs,
+            format_func=tariff_name,
+            key="region_electric_tariff_input",
+        )
+        selected_gas_tariff = st.selectbox(
+            f"Gas tariff — {gas_provider}",
+            gas_tariffs,
+            format_func=tariff_name,
+            key="region_gas_tariff_input",
+        )
+        selected_region_propane_price = st.number_input(
+            "Propane price ($/gallon)",
+            min_value=0.0,
+            value=float(DEFAULT_PROPANE_PRICE_PER_GALLON),
+            step=0.01,
+            format="%.3f",
+            key="region_propane_price_input",
+        )
 
-    propane_daily_input = gas_matrix.sum(axis=1) * GAS_WH_EFFICIENCY / PROPANE_WH_EFFICIENCY
-    propane_daily_gallons = propane_daily_input / PROPANE_KWH_PER_GALLON
-    propane_multiplier = _period_multiplier(2026, period)
-    propane_cost = (
-        propane_daily_gallons
-        * propane_multiplier
-        * float(propane_price_per_gallon)
-    )
+        sample_count = region_sample_count(
+            data,
+            usage_sample,
+            sample_counties,
+        )
+        st.caption(
+            f"Sample counties: {', '.join(sample_counties)} · "
+            f"Sample households: {sample_count}"
+        )
 
-    result = pd.DataFrame(
-        {
-            "bldg_id": houses["bldg_id"].astype(str).to_numpy(),
-            "scenario_geography": str(label),
-            "county": houses["in.county_name"].astype(str).to_numpy(),
-            "electric_provider": str(electric_provider),
-            "electric_tariff": str(electric_tariff),
-            "electric_year": int(electric_scenario["electric_year"]),
-            "gas_provider": str(gas_provider),
-            "gas_tariff": str(gas_tariff),
-            "gas_year": int(gas_scenario["gas_year"]),
-            "hpwh_daily_use_kwh": hpwh_matrix.sum(axis=1),
-            "gas_input_daily_use_kwh": gas_matrix.sum(axis=1),
-            "resistance_daily_use_kwh": resistance_matrix.sum(axis=1),
-            "propane_daily_gallons": propane_daily_gallons,
-            "hpwh_monthly_cost": hpwh_cost,
-            "gas_monthly_cost": gas_cost,
-            "propane_monthly_cost": propane_cost,
-            "resistance_monthly_cost": resistance_cost,
+        default_region_applied = {
+            "region": selected_region,
+            "sample_counties": sample_counties,
+            "period": selected_region_period,
+            "electric_provider": electric_provider,
+            "electric_tariff": electric_tariffs[0],
+            "gas_provider": gas_provider,
+            "gas_tariff": gas_tariffs[0],
+            "usage_sample": usage_sample,
+            "propane_price": float(DEFAULT_PROPANE_PRICE_PER_GALLON),
         }
-    )
-    result["hpwh_minus_gas"] = result["hpwh_monthly_cost"] - result["gas_monthly_cost"]
-    result["propane_minus_gas"] = result["propane_monthly_cost"] - result["gas_monthly_cost"]
-    result["resistance_minus_gas"] = result["resistance_monthly_cost"] - result["gas_monthly_cost"]
+        st.session_state.setdefault("applied_region", default_region_applied)
 
-    return CountyScenarioResult(
-        households=result,
-        hpwh_summary=_summary(result["hpwh_monthly_cost"]),
-        gas_summary=_summary(result["gas_monthly_cost"]),
-        propane_summary=_summary(result["propane_monthly_cost"]),
-        resistance_summary=_summary(result["resistance_monthly_cost"]),
-        hpwh_minus_gas_summary=_summary(result["hpwh_minus_gas"]),
-        geography_label=str(label),
-        sample_counties=sample_counties,
-        electric_provider=str(electric_provider),
-        gas_provider=str(gas_provider),
-        electric_tariff=str(electric_tariff),
-        gas_tariff=str(gas_tariff),
-        electric_year=int(electric_scenario["electric_year"]),
-        gas_year=int(gas_scenario["gas_year"]),
-        usage_sample=str(usage_sample),
+        if st.button(
+            "Calculate / Update",
+            type="primary",
+            use_container_width=True,
+            key="region_calculate_button",
+        ):
+            st.session_state["applied_region"] = {
+                "region": selected_region,
+                "sample_counties": sample_counties,
+                "period": selected_region_period,
+                "electric_provider": electric_provider,
+                "electric_tariff": selected_electric_tariff,
+                "gas_provider": gas_provider,
+                "gas_tariff": selected_gas_tariff,
+                "usage_sample": usage_sample,
+                "propane_price": float(selected_region_propane_price),
+            }
+
+        applied = st.session_state["applied_region"]
+        st.caption(
+            f"Applied: {applied['region']} · "
+            f"{PERIOD_OPTIONS[applied['period']]}"
+        )
+
+    else:
+        selected_space_region = st.selectbox(
+            "County / area",
+            SPACE_HEATING_REGION_OPTIONS,
+            key="space_region_input",
+        )
+        selected_space_period = st.selectbox(
+            "Period",
+            list(PERIOD_OPTIONS),
+            format_func=lambda code: PERIOD_OPTIONS[code],
+            key="space_period_input",
+        )
+
+        space_config = SPACE_HEATING_REGION_CONFIGS[selected_space_region]
+        space_counties = tuple(space_config["counties"])
+        space_electric_provider = str(space_config["electric_provider"])
+        space_gas_provider = str(space_config["gas_provider"])
+
+        try:
+            space_electric_tariffs = available_electric_tariffs(
+                data,
+                space_electric_provider,
+                selected_space_period,
+            )
+            space_gas_tariffs = available_gas_tariffs(
+                data,
+                space_gas_provider,
+            )
+        except Exception as exc:
+            st.error(str(exc))
+            st.stop()
+
+        if not space_electric_tariffs or not space_gas_tariffs:
+            st.error("No complete tariff is available for the selected scenario.")
+            st.stop()
+
+        current_space_electric = st.session_state.get(
+            "space_electric_tariff_input"
+        )
+        if current_space_electric not in space_electric_tariffs:
+            st.session_state["space_electric_tariff_input"] = (
+                space_electric_tariffs[0]
+            )
+        current_space_gas = st.session_state.get("space_gas_tariff_input")
+        if current_space_gas not in space_gas_tariffs:
+            st.session_state["space_gas_tariff_input"] = space_gas_tariffs[0]
+
+        selected_space_electric_tariff = st.selectbox(
+            f"Electricity tariff — {space_electric_provider}",
+            space_electric_tariffs,
+            format_func=tariff_name,
+            key="space_electric_tariff_input",
+        )
+        selected_space_gas_tariff = st.selectbox(
+            f"Gas tariff — {space_gas_provider}",
+            space_gas_tariffs,
+            format_func=tariff_name,
+            key="space_gas_tariff_input",
+        )
+        selected_space_propane_price = st.number_input(
+            "Propane price ($/gallon)",
+            min_value=0.0,
+            value=float(DEFAULT_PROPANE_PRICE_PER_GALLON),
+            step=0.01,
+            format="%.3f",
+            key="space_propane_price_input",
+        )
+
+        space_sample_count = int(
+            data.gt_space_electricity_usage["bldg_id"].nunique()
+        )
+        st.caption(
+            f"Sample counties: {', '.join(space_counties)} · "
+            f"Sample households: {space_sample_count}"
+        )
+
+        default_space_applied = {
+            "region": selected_space_region,
+            "sample_counties": space_counties,
+            "period": selected_space_period,
+            "electric_provider": space_electric_provider,
+            "electric_tariff": space_electric_tariffs[0],
+            "gas_provider": space_gas_provider,
+            "gas_tariff": space_gas_tariffs[0],
+            "propane_price": float(DEFAULT_PROPANE_PRICE_PER_GALLON),
+        }
+        st.session_state.setdefault(
+            "applied_space_heating",
+            default_space_applied,
+        )
+
+        if st.button(
+            "Calculate / Update",
+            type="primary",
+            use_container_width=True,
+            key="space_calculate_button",
+        ):
+            st.session_state["applied_space_heating"] = {
+                "region": selected_space_region,
+                "sample_counties": space_counties,
+                "period": selected_space_period,
+                "electric_provider": space_electric_provider,
+                "electric_tariff": selected_space_electric_tariff,
+                "gas_provider": space_gas_provider,
+                "gas_tariff": selected_space_gas_tariff,
+                "propane_price": float(selected_space_propane_price),
+            }
+
+        applied = st.session_state["applied_space_heating"]
+        st.caption(
+            f"Applied: {applied['region']} · "
+            f"{PERIOD_OPTIONS[applied['period']]}"
+        )
+
+
+if analysis_mode == "All Michigan sample":
+    applied = st.session_state["applied_statewide"]
+    with st.spinner("Calculating statewide results..."):
+        result = calculate_statewide_cached(
+            signature,
+            applied["period"],
+            float(applied["propane_price"]),
+        )
+
+    st.subheader(f"Results — {PROFILE_LABELS[applied['period']]}")
+    st.caption(
+        f"149 mapped households · Propane price: "
+        f"${float(applied['propane_price']):.3f}/gallon"
     )
+
+    first_1, first_2, first_3 = st.columns(3)
+    show_summary_card(
+        first_1,
+        "HPWH monthly electricity cost",
+        result.hpwh_summary,
+        result.interval_95["hpwh"],
+    )
+    show_summary_card(
+        first_2,
+        "Natural-gas WH monthly cost",
+        result.gas_summary,
+        result.interval_95["gas"],
+    )
+    show_summary_card(
+        first_3,
+        "HPWH − Gas WH cost difference",
+        result.hpwh_minus_gas_summary,
+        result.interval_95["hpwh_minus_gas"],
+    )
+
+    st.markdown("### Additional water-heater scenarios")
+    second_1, second_2 = st.columns(2)
+    show_summary_card(
+        second_1,
+        "Propane WH monthly cost",
+        result.propane_summary,
+        result.interval_95["propane"],
+    )
+    show_summary_card(
+        second_2,
+        "Electric resistance WH monthly cost",
+        result.resistance_summary,
+        result.interval_95["resistance"],
+    )
+
+    st.caption(
+        "Gas, propane, and electric-resistance Central 95% means use the same "
+        "gas-consumption-based household set. HPWH uses its HPWH-consumption set."
+    )
+
+    with st.expander("Calculation assumptions and formulas", expanded=False):
+        st.markdown(
+            f"""
+- Baseline natural-gas WH efficiency: `{GAS_WH_EFFICIENCY:.2f}`
+- Propane WH efficiency: `{PROPANE_WH_EFFICIENCY:.2f}`
+- Electric resistance WH efficiency: `{RESISTANCE_WH_EFFICIENCY:.2f}`
+- Propane energy content: `{PROPANE_KWH_PER_GALLON:.3f} kWh/gallon`
+- Propane input = natural-gas input × `{GAS_WH_EFFICIENCY:.2f}/{PROPANE_WH_EFFICIENCY:.2f}`
+- Electric resistance use = natural-gas input × `{GAS_WH_EFFICIENCY:.2f}/{RESISTANCE_WH_EFFICIENCY:.2f}`
+- Electric resistance uses the same regional electricity tariffs as HPWH.
+- January/August use the selected average daily profile multiplied by calendar days.
+- Annual average applies the annual-average daily profile to all 12 monthly tariffs, totals the year, and divides by 12.
+            """
+        )
+
+    show_charts = st.checkbox("Show hourly charts", value=False)
+    if show_charts:
+        render_statewide_charts(result)
+
+    show_details = st.checkbox("Show detailed household tables", value=False)
+    if show_details:
+        render_statewide_details(result, data)
+
+elif analysis_mode == "County / area scenario":
+    applied = st.session_state["applied_region"]
+    with st.spinner("Calculating county / area scenario..."):
+        result = calculate_county_cached(
+            signature,
+            applied["region"],
+            tuple(applied["sample_counties"]),
+            applied["electric_provider"],
+            applied["electric_tariff"],
+            applied["gas_provider"],
+            applied["gas_tariff"],
+            applied["period"],
+            float(applied["propane_price"]),
+            applied.get(
+                "usage_sample",
+                REGION_CONFIGS.get(applied["region"], {}).get(
+                    "usage_sample",
+                    "mapped",
+                ),
+            ),
+        )
+
+    st.subheader(
+        f"Results — {applied['region']} · "
+        f"{PROFILE_LABELS[applied['period']]}"
+    )
+    st.caption(
+        f"Sample counties: {', '.join(result.sample_counties)} · "
+        f"Households: {len(result.households)} · "
+        f"Electricity: {result.electric_provider} / "
+        f"{tariff_name(result.electric_tariff)} · "
+        f"Gas: {result.gas_provider} / {tariff_name(result.gas_tariff)} · "
+        f"Propane: ${float(applied['propane_price']):.3f}/gallon"
+    )
+    if result.usage_sample == "grand_traverse_dedicated":
+        st.caption(
+            f"Usage source: dedicated Grand Traverse sample — "
+            f"{len(result.households)} paired HPWH and natural-gas households."
+        )
+
+    first_1, first_2, first_3 = st.columns(3)
+    show_summary_card(
+        first_1,
+        "HPWH monthly electricity cost",
+        result.hpwh_summary,
+    )
+    show_summary_card(
+        first_2,
+        "Natural-gas WH monthly cost",
+        result.gas_summary,
+    )
+    show_summary_card(
+        first_3,
+        "HPWH − Gas WH cost difference",
+        result.hpwh_minus_gas_summary,
+    )
+
+    st.markdown("### Additional water-heater scenarios")
+    second_1, second_2 = st.columns(2)
+    show_summary_card(
+        second_1,
+        "Propane WH monthly cost",
+        result.propane_summary,
+    )
+    show_summary_card(
+        second_2,
+        "Electric resistance WH monthly cost",
+        result.resistance_summary,
+    )
+
+    st.caption(
+        "The selected electricity and gas tariffs are applied to every sampled "
+        "household in the selected county or multi-county area. Holland pools "
+        "Ottawa and Allegan County households and applies Holland Board of Public "
+        "Works and SEMCO tariffs. Traverse City uses the separate 75-household "
+        "Grand Traverse sample and applies Traverse City Light & Power and DTE "
+        "Gas tariffs."
+    )
+
+    if applied["region"] == "Traverse City":
+        show_traverse_city_rate_tables(
+            data,
+            str(applied["electric_tariff"]),
+        )
+
+    if len(result.households) < 10:
+        st.warning(
+            f"Small pilot sample: this scenario contains only "
+            f"{len(result.households)} households and should not be interpreted "
+            "as representative of the full service territory."
+        )
+
+    if st.checkbox("Show regional household table", value=False):
+        display = result.households.sort_values(
+            ["county", "bldg_id"],
+            key=lambda series: (
+                pd.to_numeric(series, errors="coerce")
+                if series.name == "bldg_id"
+                else series.astype(str)
+            ),
+            kind="stable",
+        ).reset_index(drop=True)
+        display.insert(0, "Area House No.", range(1, len(display) + 1))
+        st.dataframe(
+            display,
+            use_container_width=True,
+            hide_index=True,
+            height=620,
+        )
+        safe_name = (
+            applied["region"]
+            .lower()
+            .replace(" ", "_")
+            .replace("(", "")
+            .replace(")", "")
+            .replace("+", "and")
+        )
+        st.download_button(
+            "Download regional results as CSV",
+            display.to_csv(index=False).encode("utf-8"),
+            file_name=f"{safe_name}_scenario.csv",
+            mime="text/csv",
+        )
+
+else:
+    applied = st.session_state["applied_space_heating"]
+    with st.spinner("Calculating space-heating scenario..."):
+        result = calculate_space_heating_cached(
+            signature,
+            applied["region"],
+            tuple(applied["sample_counties"]),
+            applied["electric_provider"],
+            applied["electric_tariff"],
+            applied["gas_provider"],
+            applied["gas_tariff"],
+            applied["period"],
+            float(applied["propane_price"]),
+        )
+
+    st.subheader(
+        f"Space-heating results — {applied['region']} · "
+        f"{PROFILE_LABELS[applied['period']]}"
+    )
+    st.caption(
+        f"Sample counties: {', '.join(result.sample_counties)} · "
+        f"Households: {len(result.households)} · "
+        f"Electricity: {result.electric_provider} / "
+        f"{tariff_name(result.electric_tariff)} · "
+        f"Gas: {result.gas_provider} / {tariff_name(result.gas_tariff)} · "
+        f"Propane: ${float(applied['propane_price']):.3f}/gallon"
+    )
+    st.caption(
+        "Usage source: dedicated Grand Traverse paired sample — heat-pump "
+        "space-heating electricity and baseline natural-gas space heating."
+    )
+
+    first_1, first_2, first_3 = st.columns(3)
+    show_summary_card(
+        first_1,
+        "Heat-pump space-heating monthly electricity cost",
+        result.heat_pump_summary,
+        result.interval_95["heat_pump"],
+    )
+    show_summary_card(
+        first_2,
+        "Natural-gas space-heating monthly cost",
+        result.gas_summary,
+        result.interval_95["gas"],
+    )
+    show_summary_card(
+        first_3,
+        "Heat pump − Gas cost difference",
+        result.heat_pump_minus_gas_summary,
+        result.interval_95["heat_pump_minus_gas"],
+    )
+
+    st.markdown("### Additional space-heating scenario")
+    second_1, second_2 = st.columns(2)
+    show_summary_card(
+        second_1,
+        "Propane space-heating monthly cost",
+        result.propane_summary,
+        result.interval_95["propane"],
+    )
+    second_2.empty()
+
+    st.caption(
+        "Central 95% means trim households by space-heating consumption. "
+        "Heat-pump and gas results use their own consumption sets; the cost "
+        "difference uses the intersection."
+    )
+
+    with st.expander("Space-heating assumptions and formulas", expanded=False):
+        st.markdown(
+            f"""
+- Heat-pump electricity profile: `MI_housesample_gt_Space_elec_hourly_average_kwh.xlsx`
+- Natural-gas profile: `MI_housesample_gt_Space_gas_hourly_average_kwh.xlsx`
+- Heat-pump cost uses the uploaded electric space-heating profile directly; it is not derived from gas consumption.
+- Natural-gas cost uses the uploaded gas space-heating profile directly.
+- Propane is based only on the natural-gas space-heating input profile.
+- Propane assumes equivalent combustion efficiency, so propane input energy = natural-gas input energy.
+- Propane gallons = natural-gas input kWh ÷ `{PROPANE_KWH_PER_GALLON:.3f} kWh/gallon`.
+- Propane price: `${float(applied['propane_price']):.3f}/gallon`.
+- January/August use the selected average daily profile multiplied by calendar days.
+- Annual average applies the annual-average daily profile to all 12 monthly electricity tariffs, totals the year, and divides by 12.
+- The source profiles use `out.electricity.heating.energy_consumption..kwh` and `out.natural_gas.heating.energy_consumption..kwh`. Separate fan/pump and backup-heating columns are not added by this calculator.
+            """
+        )
+
+    show_traverse_city_rate_tables(
+        data,
+        str(applied["electric_tariff"]),
+    )
+
+    if st.checkbox(
+        "Show space-heating household table",
+        value=False,
+        key="show_space_household_table",
+    ):
+        display = result.households.sort_values(
+            "bldg_id",
+            key=lambda series: pd.to_numeric(series, errors="coerce"),
+            kind="stable",
+        ).reset_index(drop=True)
+        display.insert(0, "Area House No.", range(1, len(display) + 1))
+        st.dataframe(
+            display,
+            use_container_width=True,
+            hide_index=True,
+            height=620,
+        )
+        st.download_button(
+            "Download space-heating results as CSV",
+            display.to_csv(index=False).encode("utf-8"),
+            file_name="traverse_city_space_heating_scenario.csv",
+            mime="text/csv",
+        )
