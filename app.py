@@ -1075,23 +1075,22 @@ else:
         f"Propane: ${float(applied['propane_price']):.3f}/gallon"
     )
     usage_source_caption = (
-        "Usage source: dedicated Grand Traverse paired sample. "
-        "Both Upgrade 4 (heat pump) and Upgrade 0 (natural gas) contain "
-        "separate electricity and natural-gas rows; each row is billed with "
-        "its corresponding utility tariff. Zero-use August profiles and zero "
-        "gas-backup rows are retained."
+        "Usage source: dedicated Grand Traverse eligible paired sample — "
+        "heat-pump space-heating electricity and baseline natural-gas space "
+        "heating. Zero-use August profiles are retained."
     )
     if data.excluded_building_ids:
         usage_source_caption += (
-            f" {len(data.excluded_building_ids)} household(s) with no positive "
-            "space-heating use across either energy source were excluded."
+            f" {len(data.excluded_building_ids)} household(s) with an all-zero "
+            "heat-pump or gas profile across January, August, and annual average "
+            "were excluded as non-applicable scenarios."
         )
     st.caption(usage_source_caption)
 
     first_1, first_2, first_3 = st.columns(3)
     show_summary_card(
         first_1,
-        "Heat-pump space-heating monthly cost",
+        "Heat-pump space-heating monthly electricity cost",
         result.heat_pump_summary,
         result.interval_95["heat_pump"],
     )
@@ -1119,25 +1118,25 @@ else:
     second_2.empty()
 
     st.caption(
-        "Central 95% keeps the original trimming basis: Upgrade 4 is trimmed "
-        "by its electricity-use profile, while Upgrade 0 / propane are trimmed "
-        "by main natural-gas use; the cost difference uses the intersection."
+        "Central 95% means trim households by space-heating consumption. "
+        "Heat-pump and gas results use their own consumption sets; the cost "
+        "difference uses the intersection."
     )
 
     with st.expander("Space-heating assumptions and formulas", expanded=False):
         st.markdown(
             f"""
-- Upgrade 4 profile: `MI_housesample_gt_Space_elec_hourly_average_kwh.xlsx`
-- Upgrade 0 profile: `MI_housesample_gt_Space_gas_aux_hourly_average_kwh.xlsx`
-- Each file contains two rows per household/period: `electricity` and `natural_gas`.
-- Upgrade 4 cost = heat-pump-system electricity × electric tariff + natural-gas HP backup × gas tariff.
-- Upgrade 0 cost = gas main-heating input × gas tariff + heating fan/pump electricity × electric tariff.
-- Propane uses the Upgrade 0 gas-heating input converted to gallons and retains the Upgrade 0 fan/pump electricity cost.
-- Propane assumes equivalent combustion efficiency, so propane input energy = baseline natural-gas input energy.
+- Heat-pump electricity profile: `MI_housesample_gt_Space_elec_hourly_average_kwh.xlsx`
+- Natural-gas profile: `MI_housesample_gt_Space_gas_hourly_average_kwh.xlsx`
+- Heat-pump cost uses the uploaded electric space-heating profile directly; it is not derived from gas consumption.
+- Natural-gas cost uses the uploaded gas space-heating profile directly.
+- Propane is based only on the natural-gas space-heating input profile.
+- Propane assumes equivalent combustion efficiency, so propane input energy = natural-gas input energy.
 - Propane gallons = natural-gas input kWh ÷ `{PROPANE_KWH_PER_GALLON:.3f} kWh/gallon`.
 - Propane price: `${float(applied['propane_price']):.3f}/gallon`.
 - January/August use the selected average daily profile multiplied by calendar days.
-- Annual average applies the annual-average daily profile to all 12 monthly tariffs, totals the year, and divides by 12.
+- Annual average applies the annual-average daily profile to all 12 monthly electricity tariffs, totals the year, and divides by 12.
+- The source profiles use `out.electricity.heating.energy_consumption..kwh` and `out.natural_gas.heating.energy_consumption..kwh`. Separate fan/pump and backup-heating columns are not added by this calculator.
             """
         )
 

@@ -155,28 +155,6 @@ def _usage_profile(
     return selected
 
 
-def _space_source_profile(
-    usage: pd.DataFrame,
-    period: str,
-    energy_source: str,
-    prefix: str,
-) -> pd.DataFrame:
-    """Select one energy-source row per house for a space-heating period."""
-    selected = usage.loc[
-        (usage["season"].astype(str) == str(period))
-        & (usage["energy_source"].astype(str) == str(energy_source)),
-        ["bldg_id", *USAGE_HOUR_COLUMNS],
-    ].copy()
-    selected["bldg_id"] = selected["bldg_id"].astype(str)
-    selected = selected.rename(
-        columns={
-            column: f"{prefix}_{hour:02d}"
-            for hour, column in enumerate(USAGE_HOUR_COLUMNS)
-        }
-    )
-    return selected
-
-
 def _houses_with_profiles(data: CalculatorData, period: str) -> pd.DataFrame:
     electric = _usage_profile(data.electricity_usage, period, "hpwh")
     gas = _usage_profile(data.gas_usage, period, "gas")
@@ -880,19 +858,7 @@ def calculate_space_heating_scenario(
     propane_price_per_gallon: float = DEFAULT_PROPANE_PRICE_PER_GALLON,
     geography_label: str | None = None,
 ) -> SpaceHeatingResult:
-    """Compare full operating costs for Grand Traverse space-heating scenarios.
-
-    Heat-pump scenario (Upgrade 4):
-      electricity row -> electricity tariff
-      natural_gas row -> gas tariff
-
-    Natural-gas scenario (Upgrade 0):
-      electricity row -> electricity tariff
-      natural_gas row -> gas tariff
-
-    Propane uses the Upgrade-0 natural-gas heating input converted to gallons,
-    plus the Upgrade-0 ancillary electricity row at the electricity tariff.
-    """
+    """Compare heat-pump, natural-gas, and propane space-heating costs."""
     if period not in SUPPORTED_PERIODS:
         raise ValueError(f"Unsupported period: {period}")
     if propane_price_per_gallon < 0:
@@ -908,39 +874,21 @@ def calculate_space_heating_scenario(
 
     label = geography_label or "Traverse City"
 
-    # Upgrade 4: heat-pump scenario, separate electricity and gas-backup rows.
-    hp_electric = _space_source_profile(
+    electric = _usage_profile(
         data.gt_space_electricity_usage,
         period,
-        "electricity",
-        "hp_electric",
+        "heat_pump",
     )
-    hp_gas = _space_source_profile(
-        data.gt_space_electricity_usage,
-        period,
-        "natural_gas",
-        "hp_gas",
-    )
-
-    # Upgrade 0: natural-gas scenario, separate gas-main and fan/pump electricity.
-    gas_main = _space_source_profile(
+    gas = _usage_profile(
         data.gt_space_gas_usage,
         period,
-        "natural_gas",
-        "gas_main",
+        "gas_heat",
     )
-    gas_electric = _space_source_profile(
-        data.gt_space_gas_usage,
-        period,
-        "electricity",
-        "gas_electric",
-    )
-
-    houses = (
-        hp_electric
-        .merge(hp_gas, on="bldg_id", how="inner", validate="one_to_one")
-        .merge(gas_main, on="bldg_id", how="inner", validate="one_to_one")
-        .merge(gas_electric, on="bldg_id", how="inner", validate="one_to_one")
+    houses = electric.merge(
+        gas,
+        on="bldg_id",
+        how="inner",
+        validate="one_to_one",
     )
     houses.insert(1, "in.county_name", "Grand Traverse County")
 
@@ -962,49 +910,31 @@ def calculate_space_heating_scenario(
         period,
     )
 
-    hp_electric_columns = [f"hp_electric_{hour:02d}" for hour in range(24)]
-    hp_gas_columns = [f"hp_gas_{hour:02d}" for hour in range(24)]
-    gas_main_columns = [f"gas_main_{hour:02d}" for hour in range(24)]
-    gas_electric_columns = [f"gas_electric_{hour:02d}" for hour in range(24)]
+    heat_pump_columns = [f"heat_pump_{hour:02d}" for hour in range(24)]
+    gas_columns = [f"gas_heat_{hour:02d}" for hour in range(24)]
     factor_columns = [f"factor_{hour:02d}" for hour in range(24)]
 
-    hp_electric_matrix = houses[hp_electric_columns].astype(float).to_numpy()
-    hp_gas_matrix = houses[hp_gas_columns].astype(float).to_numpy()
-    gas_main_matrix = houses[gas_main_columns].astype(float).to_numpy()
-    gas_electric_matrix = houses[gas_electric_columns].astype(float).to_numpy()
-
+    heat_pump_matrix = houses[heat_pump_columns].astype(float).to_numpy()
+    gas_matrix = houses[gas_columns].astype(float).to_numpy()
     electric_factor = electric_scenario[factor_columns].astype(float).to_numpy()
     gas_factor = gas_scenario[factor_columns].astype(float).to_numpy()
 
-    # Every electricity row is billed at the electricity tariff; every
-    # natural-gas row is billed at the gas tariff.
-    hp_electric_cost = hp_electric_matrix @ electric_factor
-    hp_gas_cost = hp_gas_matrix @ gas_factor
-    heat_pump_cost = hp_electric_cost + hp_gas_cost
+    heat_pump_cost = heat_pump_matrix @ electric_factor
+    gas_cost = gas_matrix @ gas_factor
 
-    gas_main_cost = gas_main_matrix @ gas_factor
-    gas_electric_cost = gas_electric_matrix @ electric_factor
-    gas_cost = gas_main_cost + gas_electric_cost
-
-    # Propane keeps the Upgrade-0 heating demand basis. The gas-main input is
-    # converted to propane gallons, while the same ancillary electricity row
-    # remains billed at the selected electricity tariff.
-    propane_daily_gallons = gas_main_matrix.sum(axis=1) / PROPANE_KWH_PER_GALLON
+    # Propane is treated as an equivalent combustion-heating scenario with
+    # the same input-energy requirement as the baseline natural-gas profile.
+    # Therefore no heat-pump electricity profile is used in this conversion.
+    propane_daily_gallons = gas_matrix.sum(axis=1) / PROPANE_KWH_PER_GALLON
     propane_multiplier = _period_multiplier(
         int(electric_scenario["electric_year"]),
         period,
     )
-    propane_fuel_cost = (
+    propane_cost = (
         propane_daily_gallons
         * propane_multiplier
         * float(propane_price_per_gallon)
     )
-    propane_cost = propane_fuel_cost + gas_electric_cost
-
-    hp_electric_daily = hp_electric_matrix.sum(axis=1)
-    hp_gas_daily = hp_gas_matrix.sum(axis=1)
-    gas_main_daily = gas_main_matrix.sum(axis=1)
-    gas_electric_daily = gas_electric_matrix.sum(axis=1)
 
     result = pd.DataFrame(
         {
@@ -1017,25 +947,14 @@ def calculate_space_heating_scenario(
             "gas_provider": str(gas_provider),
             "gas_tariff": str(gas_tariff),
             "gas_year": int(gas_scenario["gas_year"]),
-            "heat_pump_electric_daily_use_kwh": hp_electric_daily,
-            "heat_pump_gas_aux_daily_use_kwh": hp_gas_daily,
-            "heat_pump_total_daily_use_kwh": hp_electric_daily + hp_gas_daily,
-            "gas_main_daily_use_kwh": gas_main_daily,
-            "gas_fan_pump_daily_use_kwh": gas_electric_daily,
-            "gas_total_daily_use_kwh": gas_main_daily + gas_electric_daily,
+            "heat_pump_daily_use_kwh": heat_pump_matrix.sum(axis=1),
+            "gas_input_daily_use_kwh": gas_matrix.sum(axis=1),
             "propane_daily_gallons": propane_daily_gallons,
-            "heat_pump_electricity_cost": hp_electric_cost,
-            "heat_pump_gas_aux_cost": hp_gas_cost,
             "heat_pump_monthly_cost": heat_pump_cost,
-            "gas_fuel_cost": gas_main_cost,
-            "gas_fan_pump_electricity_cost": gas_electric_cost,
             "gas_monthly_cost": gas_cost,
-            "propane_fuel_cost": propane_fuel_cost,
-            "propane_fan_pump_electricity_cost": gas_electric_cost,
             "propane_monthly_cost": propane_cost,
         }
     )
-
     result["heat_pump_minus_gas"] = (
         result["heat_pump_monthly_cost"] - result["gas_monthly_cost"]
     )
@@ -1043,16 +962,13 @@ def calculate_space_heating_scenario(
         result["propane_monthly_cost"] - result["gas_monthly_cost"]
     )
 
-    # Keep the original central-95% trimming basis: Upgrade 4 is trimmed by
-    # its electricity profile, and Upgrade 0 / propane by the main gas profile.
-    # Ancillary-source rows affect cost but do not redefine the trimming basis.
     heat_pump_95_ids = _central_95_ids(
         result,
-        "heat_pump_electric_daily_use_kwh",
+        "heat_pump_daily_use_kwh",
     )
     gas_95_ids = _central_95_ids(
         result,
-        "gas_main_daily_use_kwh",
+        "gas_input_daily_use_kwh",
     )
     paired_95_ids = heat_pump_95_ids & gas_95_ids
 
@@ -1095,3 +1011,4 @@ def calculate_space_heating_scenario(
         electric_year=int(electric_scenario["electric_year"]),
         gas_year=int(gas_scenario["gas_year"]),
     )
+

@@ -17,7 +17,7 @@ GT_SPACE_ELECTRICITY_USAGE_FILE = (
     "MI_housesample_gt_Space_elec_hourly_average_kwh.xlsx"
 )
 GT_SPACE_GAS_USAGE_FILE = (
-    "MI_housesample_gt_Space_gas_aux_hourly_average_kwh.xlsx"
+    "MI_housesample_gt_Space_gas_hourly_average_kwh.xlsx"
 )
 PROVIDER_FILE = "MI_provider_county_with_utility_providers.xlsx"
 ELECTRICITY_RATE_FILE = "electricity_rates_weekdays_202607.xlsx"
@@ -148,66 +148,6 @@ def load_hourly_usage(path: Path, source: str) -> pd.DataFrame:
         )
         raise ValueError(
             f"{source} contains duplicate building/profile rows: {examples}"
-        )
-
-    return df.reset_index(drop=True)
-
-
-def load_space_hourly_usage(path: Path, source: str) -> pd.DataFrame:
-    """Load a space-heating scenario with separate electricity/gas rows."""
-    df = pd.read_excel(path, dtype={"bldg_id": "string"})
-    df.columns = [str(column).strip() for column in df.columns]
-
-    required = [
-        "bldg_id",
-        "season",
-        "energy_source",
-        *USAGE_HOUR_COLUMNS,
-    ]
-    _require_columns(df, required, source)
-    df = df[required].copy()
-
-    df["bldg_id"] = _normalize_id(df["bldg_id"])
-    df["season"] = df["season"].map(_normalize_profile)
-    df["energy_source"] = _clean_text(df["energy_source"]).str.lower()
-
-    allowed_sources = {"electricity", "natural_gas"}
-    unexpected_sources = sorted(
-        set(df["energy_source"].dropna().astype(str)) - allowed_sources
-    )
-    if unexpected_sources:
-        raise ValueError(
-            f"{source} contains unexpected energy_source values: "
-            f"{unexpected_sources}. Expected electricity/natural_gas."
-        )
-
-    for column in USAGE_HOUR_COLUMNS:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
-
-    invalid = df[USAGE_HOUR_COLUMNS].isna().any(axis=1)
-    if invalid.any():
-        raise ValueError(
-            f"{source} contains blank or nonnumeric hourly usage values. "
-            f"Example row indices: {df.index[invalid].tolist()[:10]}"
-        )
-
-    duplicate = df.duplicated(
-        ["bldg_id", "season", "energy_source"],
-        keep=False,
-    )
-    if duplicate.any():
-        examples = (
-            df.loc[
-                duplicate,
-                ["bldg_id", "season", "energy_source"],
-            ]
-            .drop_duplicates()
-            .head(10)
-            .to_dict("records")
-        )
-        raise ValueError(
-            f"{source} contains duplicate building/profile/source rows: "
-            f"{examples}"
         )
 
     return df.reset_index(drop=True)
@@ -451,88 +391,64 @@ def _validate_dedicated_usage_pair(
             )
 
 def _validate_space_heating_usage_pair(
-    heat_pump_usage: pd.DataFrame,
+    electricity_usage: pd.DataFrame,
     gas_usage: pd.DataFrame,
     sample_label: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame, tuple[str, ...]]:
-    """Validate paired scenario files with electricity and natural-gas rows.
+    """Validate and retain only eligible paired space-heating households.
 
-    Each household must contain January, August, and annual-average profiles
-    for both energy sources. An individual energy source may be entirely zero
-    (for example, no natural-gas HP backup). A household is excluded only if
-    the entire scenario is zero across both sources and all stored profiles.
+    Zero-use August profiles are normal and remain in the data. A household is
+    excluded only when its heat-pump file or natural-gas file is zero across
+    all three stored profiles (January, August, and annual average). Such rows
+    indicate a non-applicable technology/fuel scenario and must not be treated
+    as a genuine zero-cost heating alternative.
     """
     required_profiles = {"1", "8", "year"}
-    required_sources = {"electricity", "natural_gas"}
-
-    heat_pump_ids = set(heat_pump_usage["bldg_id"].astype(str))
+    electricity_ids = set(electricity_usage["bldg_id"].astype(str))
     gas_ids = set(gas_usage["bldg_id"].astype(str))
 
-    if not heat_pump_ids:
+    if not electricity_ids:
         raise ValueError(f"{sample_label} contains no households.")
-    if heat_pump_ids != gas_ids:
-        missing_from_heat_pump = sorted(gas_ids - heat_pump_ids)
-        missing_from_gas = sorted(heat_pump_ids - gas_ids)
+    if electricity_ids != gas_ids:
+        missing_from_electricity = sorted(gas_ids - electricity_ids)
+        missing_from_gas = sorted(electricity_ids - gas_ids)
         raise ValueError(
             f"{sample_label} heat-pump and gas files do not contain "
             "identical building IDs. "
-            f"Missing from heat-pump file: {missing_from_heat_pump[:10]}; "
+            f"Missing from heat-pump file: {missing_from_electricity[:10]}; "
             f"missing from gas file: {missing_from_gas[:10]}."
         )
 
-    positive_ids_by_scenario: list[set[str]] = []
+    positive_ids_by_source: list[set[str]] = []
 
     for usage_name, usage_df in [
-        ("heat-pump scenario", heat_pump_usage),
-        ("natural-gas scenario", gas_usage),
+        ("heat-pump electricity", electricity_usage),
+        ("natural-gas input", gas_usage),
     ]:
         profile_sets = (
             usage_df.groupby("bldg_id")["season"]
             .agg(lambda values: set(values.astype(str)))
         )
-        incomplete_profiles = profile_sets[
+        incomplete = profile_sets[
             profile_sets.map(
                 lambda profiles: not required_profiles.issubset(profiles)
             )
         ]
-        if not incomplete_profiles.empty:
+        if not incomplete.empty:
             examples = {
                 str(building_id): sorted(list(profiles))
-                for building_id, profiles in incomplete_profiles.head(10).items()
+                for building_id, profiles in incomplete.head(10).items()
             }
             raise ValueError(
-                f"{sample_label} {usage_name} is missing one or more "
+                f"{sample_label} {usage_name} file is missing one or more "
                 f"required profiles (1, 8, year): {examples}"
-            )
-
-        combo_counts = (
-            usage_df.groupby(["bldg_id", "season"])["energy_source"]
-            .agg(lambda values: set(values.astype(str)))
-        )
-        incomplete_sources = combo_counts[
-            combo_counts.map(
-                lambda sources: not required_sources.issubset(sources)
-            )
-        ]
-        if not incomplete_sources.empty:
-            examples = {
-                f"{building_id}/{season}": sorted(list(sources))
-                for (building_id, season), sources
-                in incomplete_sources.head(10).items()
-            }
-            raise ValueError(
-                f"{sample_label} {usage_name} is missing electricity or "
-                f"natural_gas rows: {examples}"
             )
 
         hourly = usage_df[USAGE_HOUR_COLUMNS].astype(float)
         negative = hourly.lt(0).any(axis=1)
         if negative.any():
             examples = (
-                usage_df.loc[
-                    negative,
-                    ["bldg_id", "season", "energy_source"],
-                ]
+                usage_df.loc[negative, ["bldg_id", "season"]]
                 .head(10)
                 .to_dict("records")
             )
@@ -549,28 +465,27 @@ def _validate_space_heating_usage_pair(
             }
         ).groupby("bldg_id", sort=False)["profile_total"].sum()
 
-        positive_ids_by_scenario.append(
+        positive_ids_by_source.append(
             set(household_totals[household_totals > 0].index.astype(str))
         )
 
-    eligible_ids = positive_ids_by_scenario[0] & positive_ids_by_scenario[1]
-    excluded_ids = tuple(sorted(heat_pump_ids - eligible_ids))
+    eligible_ids = positive_ids_by_source[0] & positive_ids_by_source[1]
+    excluded_ids = tuple(sorted(electricity_ids - eligible_ids))
 
     if not eligible_ids:
         raise ValueError(
             f"{sample_label} contains no eligible paired households with "
-            "positive space-heating use."
+            "positive heat-pump and natural-gas space-heating use."
         )
 
-    filtered_heat_pump = heat_pump_usage.loc[
-        heat_pump_usage["bldg_id"].astype(str).isin(eligible_ids)
+    filtered_electricity = electricity_usage.loc[
+        electricity_usage["bldg_id"].astype(str).isin(eligible_ids)
     ].reset_index(drop=True)
     filtered_gas = gas_usage.loc[
         gas_usage["bldg_id"].astype(str).isin(eligible_ids)
     ].reset_index(drop=True)
 
-    return filtered_heat_pump, filtered_gas, excluded_ids
-
+    return filtered_electricity, filtered_gas, excluded_ids
 
 def _empty_frame() -> pd.DataFrame:
     """Return an empty placeholder for data not needed by the active mode."""
@@ -716,11 +631,11 @@ def load_county_data(data_dir: Path = DATA_DIR) -> CalculatorData:
 
 def load_space_heating_data(data_dir: Path = DATA_DIR) -> CalculatorData:
     """Load only the dedicated Traverse City space-heating inputs and rates."""
-    gt_space_electricity_usage = load_space_hourly_usage(
+    gt_space_electricity_usage = load_hourly_usage(
         _find_file(data_dir, GT_SPACE_ELECTRICITY_USAGE_FILE),
         GT_SPACE_ELECTRICITY_USAGE_FILE,
     )
-    gt_space_gas_usage = load_space_hourly_usage(
+    gt_space_gas_usage = load_hourly_usage(
         _find_file(data_dir, GT_SPACE_GAS_USAGE_FILE),
         GT_SPACE_GAS_USAGE_FILE,
     )
@@ -758,11 +673,11 @@ def load_calculator_data(data_dir: Path = DATA_DIR) -> CalculatorData:
     """
     county_data = load_county_data(data_dir)
 
-    gt_space_electricity_usage = load_space_hourly_usage(
+    gt_space_electricity_usage = load_hourly_usage(
         _find_file(data_dir, GT_SPACE_ELECTRICITY_USAGE_FILE),
         GT_SPACE_ELECTRICITY_USAGE_FILE,
     )
-    gt_space_gas_usage = load_space_hourly_usage(
+    gt_space_gas_usage = load_hourly_usage(
         _find_file(data_dir, GT_SPACE_GAS_USAGE_FILE),
         GT_SPACE_GAS_USAGE_FILE,
     )
