@@ -1157,9 +1157,9 @@ else:
         details=[
             ("(Main) HP space heating system", hp_main_mean),
             ("(Main_furnace) fan/pump with electricity", hp_main_fan_mean),
-            ("(Aux) Auxiliary heating system powered by electricity", hp_aux_electric_mean),
+            ("(Aux) Auxiliary heating with electricity", hp_aux_electric_mean),
             ("(Aux_furnace) fan/pump with electricity", hp_aux_fan_mean),
-            ("(Aux) Auxiliary heating system powered by Natural gas", hp_aux_gas_mean),
+            ("(Aux) Auxiliary heating with Natural gas", hp_aux_gas_mean),
         ],
     )
     show_summary_card(
@@ -1204,7 +1204,7 @@ else:
             f"""
 - Upgrade 4 profile: `Grand Traverse_Space heating_upgrade4_hourly_average_kwh.xlsx`
 - Upgrade 0 profile: `Grand Traverse_Space heating_upgrade0_hourly_average_kwh.xlsx`
-- Upgrade 4 components: (Main) HP space heating system, (Main_furnace) fan/pump with electricity, (Aux) auxiliary heating system powered by electricity, (Aux_furnace) fan/pump with electricity, and (Aux) auxiliary heating system powered by natural gas.
+- Upgrade 4 components: (Main) HP space heating system, (Main_furnace) fan/pump with electricity, (Aux) auxiliary heating with electricity, (Aux_furnace) fan/pump with electricity, and (Aux) auxiliary heating with natural gas.
 - Upgrade 4 cost = four electricity-component costs + natural-gas auxiliary cost.
 - Upgrade 0 components: main natural-gas heating and blower/fan electricity.
 - Upgrade 0 cost = main gas-heating cost + blower/fan electricity cost.
