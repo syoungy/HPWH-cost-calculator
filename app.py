@@ -1155,11 +1155,11 @@ else:
         result.heat_pump_summary,
         result.interval_95["heat_pump"],
         details=[
-            ("Main heat-pump electricity", hp_main_mean),
-            ("Main fan/pump electricity", hp_main_fan_mean),
-            ("Electric auxiliary heat", hp_aux_electric_mean),
-            ("Auxiliary fan/pump electricity", hp_aux_fan_mean),
-            ("Natural-gas auxiliary heat", hp_aux_gas_mean),
+            ("(Main) HP space heating system", hp_main_mean),
+            ("(Main_furnace) fan/pump with electricity", hp_main_fan_mean),
+            ("(Aux) Auxiliary heating system powered by electricity", hp_aux_electric_mean),
+            ("(Aux_furnace) fan/pump with electricity", hp_aux_fan_mean),
+            ("(Aux) Auxiliary heating system powered by Natural gas", hp_aux_gas_mean),
         ],
     )
     show_summary_card(
@@ -1168,8 +1168,8 @@ else:
         result.gas_summary,
         result.interval_95["gas"],
         details=[
-            ("Main natural-gas heating", gas_fuel_mean),
-            ("Blower/fan electricity", gas_fan_pump_mean),
+            ("(Main) Natural gas heating system", gas_fuel_mean),
+            ("(Main_furnace) Blower/fan with electricity", gas_fan_pump_mean),
         ],
     )
     show_summary_card(
@@ -1204,7 +1204,7 @@ else:
             f"""
 - Upgrade 4 profile: `Grand Traverse_Space heating_upgrade4_hourly_average_kwh.xlsx`
 - Upgrade 0 profile: `Grand Traverse_Space heating_upgrade0_hourly_average_kwh.xlsx`
-- Upgrade 4 components: main HP heating, main fan/pump, electric auxiliary heat, auxiliary fan/pump, and natural-gas auxiliary heat.
+- Upgrade 4 components: (Main) HP space heating system, (Main_furnace) fan/pump with electricity, (Aux) auxiliary heating system powered by electricity, (Aux_furnace) fan/pump with electricity, and (Aux) auxiliary heating system powered by natural gas.
 - Upgrade 4 cost = four electricity-component costs + natural-gas auxiliary cost.
 - Upgrade 0 components: main natural-gas heating and blower/fan electricity.
 - Upgrade 0 cost = main gas-heating cost + blower/fan electricity cost.
