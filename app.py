@@ -18,7 +18,6 @@ from calculations import (
     calculate_county_scenario,
     calculate_space_heating_scenario,
     calculate_statewide,
-    daily_usage_profile,
     BILLING_YEAR,
 )
 from data_loading import (
@@ -32,9 +31,7 @@ from data_loading import (
     GT_SPACE_GAS_USAGE_FILE,
     PROFILE_LABELS,
     PROVIDER_FILE,
-    RATE_HOUR_COLUMNS,
     TARIFF_LABELS,
-    USAGE_HOUR_COLUMNS,
     load_county_data,
     load_space_heating_data,
     load_statewide_data,
@@ -118,7 +115,6 @@ def money(value: float) -> str:
     return f"-${abs(numeric):,.2f}" if numeric < 0 else f"${numeric:,.2f}"
 
 
-
 MONTH_NAMES = {
     1: "January",
     2: "February",
@@ -133,107 +129,6 @@ MONTH_NAMES = {
     11: "November",
     12: "December",
 }
-
-
-def _hour_display_label(hour: int) -> str:
-    normalized = int(hour) % 24
-    suffix = "AM" if normalized < 12 else "PM"
-    clock_hour = normalized % 12 or 12
-    return f"{clock_hour} {suffix}"
-
-
-def traverse_city_hourly_rate_table(
-    data,
-    tariff: str,
-) -> pd.DataFrame:
-    provider = "Traverse City Light & Power"
-
-    rates = data.electricity_rates.loc[
-        (data.electricity_rates["elec_provd"].astype(str) == provider)
-        & (data.electricity_rates["tariff"].astype(str) == str(tariff)),
-        ["month", *RATE_HOUR_COLUMNS],
-    ].copy()
-
-    if rates.empty:
-        raise ValueError(
-            f"No electricity-rate rows were found for {provider} / {tariff}."
-        )
-
-    rates["month"] = pd.to_numeric(
-        rates["month"],
-        errors="raise",
-    ).astype(int)
-
-    # Identical duplicate rows are harmless, but conflicting rate rows for
-    # the same month must not be silently displayed or used.
-    rates = rates.drop_duplicates()
-    duplicate_months = rates.loc[
-        rates.duplicated(subset=["month"], keep=False),
-        "month",
-    ].sort_values()
-
-    if not duplicate_months.empty:
-        months = ", ".join(
-            str(month)
-            for month in duplicate_months.unique()
-        )
-        raise ValueError(
-            f"{provider} / {tariff} contains conflicting rate profiles "
-            f"for month(s): {months}."
-        )
-
-    expected_months = list(range(1, 13))
-    actual_months = sorted(rates["month"].tolist())
-    if actual_months != expected_months:
-        raise ValueError(
-            f"{provider} / {tariff} must contain exactly one row for "
-            "each month from January through December."
-        )
-
-    rates = rates.sort_values("month").reset_index(drop=True)
-
-    table = pd.DataFrame(
-        {
-            "Month": rates["month"].map(MONTH_NAMES),
-        }
-    )
-
-    for hour, rate_column in enumerate(RATE_HOUR_COLUMNS):
-        table[_hour_display_label(hour)] = rates[rate_column].map(
-            lambda value: f"${float(value):.5f}"
-        )
-
-    return table
-
-
-def show_traverse_city_rate_tables(
-    data,
-    selected_tariff: str,
-) -> None:
-    st.markdown(
-        "#### Traverse City Light & Power — monthly hourly rate tables"
-    )
-
-    for tariff in ["Eco Champion Phase-In", "Eco Champion Non-Phase-In"]:
-        selected_label = (
-            " — Selected for this calculation"
-            if tariff == str(selected_tariff)
-            else ""
-        )
-        st.markdown(f"**{tariff}{selected_label}**")
-        st.dataframe(
-            traverse_city_hourly_rate_table(data, tariff),
-            use_container_width=True,
-            hide_index=True,
-            height=455,
-        )
-
-    st.caption(
-        "Each table shows the variable electricity rate for all 24 hours "
-        "of every month. Rates are displayed in $/kWh and are read directly "
-        "from electricity_rates_weekdays_202607.xlsx."
-    )
-
 
 
 def _data_file_path(filename: str) -> Path:
@@ -412,91 +307,6 @@ def show_summary_card(
         '</div>'
     )
     column.markdown(card_html, unsafe_allow_html=True)
-
-
-def add_house_number(frame: pd.DataFrame, data) -> pd.DataFrame:
-    order = data.provider_map[["bldg_id"]].copy()
-    order["bldg_id"] = order["bldg_id"].astype(str)
-    order["_sort"] = pd.to_numeric(order["bldg_id"], errors="coerce")
-    order = order.sort_values(["_sort", "bldg_id"], kind="stable").reset_index(drop=True)
-    order["House No."] = range(1, len(order) + 1)
-    mapping = dict(zip(order["bldg_id"], order["House No."]))
-
-    output = frame.copy()
-    output["bldg_id"] = output["bldg_id"].astype(str)
-    output.insert(0, "House No.", output["bldg_id"].map(mapping))
-    return output.sort_values(["House No.", "bldg_id"], kind="stable").reset_index(drop=True)
-
-
-def annual_hourly_table(data, household_summary: pd.DataFrame) -> pd.DataFrame:
-    electric = daily_usage_profile(data.electricity_usage)
-    gas = daily_usage_profile(data.gas_usage)
-    electric["bldg_id"] = electric["bldg_id"].astype(str)
-    gas["bldg_id"] = gas["bldg_id"].astype(str)
-
-    electric_columns = [f"HPWH {hour:02d}:00 (kWh)" for hour in range(24)]
-    gas_columns = [f"Gas-WH {hour:02d}:00 (kWh)" for hour in range(24)]
-    electric = electric.rename(columns=dict(zip(USAGE_HOUR_COLUMNS, electric_columns)))
-    gas = gas.rename(columns=dict(zip(USAGE_HOUR_COLUMNS, gas_columns)))
-    electric["HPWH annual avg daily total (kWh)"] = electric[electric_columns].sum(axis=1)
-    gas["Gas-WH annual avg daily total (kWh)"] = gas[gas_columns].sum(axis=1)
-
-    base = household_summary[["bldg_id", "county"]].copy()
-    return (
-        base.merge(electric, on="bldg_id", how="left", validate="one_to_one")
-        .merge(gas, on="bldg_id", how="left", validate="one_to_one")
-    )
-
-
-def render_statewide_details(result: StatewideResult, data) -> None:
-    st.subheader("Detailed results")
-    table_choice = st.selectbox(
-        "Detail table",
-        [
-            "Household cost summary",
-            "HPWH tariff calculations",
-            "Electric resistance tariff calculations",
-            "Gas-water-heater calculations",
-            "Paired technology comparisons",
-            "Annual hourly energy use",
-        ],
-        key="statewide_detail_table",
-    )
-
-    if table_choice == "Household cost summary":
-        display = add_house_number(result.household_summary, data)
-    elif table_choice == "HPWH tariff calculations":
-        display = add_house_number(result.hpwh_tariff_costs, data)
-    elif table_choice == "Electric resistance tariff calculations":
-        display = add_house_number(result.resistance_tariff_costs, data)
-    elif table_choice == "Gas-water-heater calculations":
-        display = add_house_number(result.gas_households, data)
-    elif table_choice == "Paired technology comparisons":
-        display = add_house_number(result.paired_households, data)
-    else:
-        display = add_house_number(annual_hourly_table(data, result.household_summary), data)
-
-    st.dataframe(display, use_container_width=True, hide_index=True, height=620)
-    st.download_button(
-        "Download displayed table as CSV",
-        display.to_csv(index=False).encode("utf-8"),
-        file_name=f"{table_choice.lower().replace(' ', '_')}.csv",
-        mime="text/csv",
-    )
-
-
-def render_statewide_charts(result: StatewideResult) -> None:
-    st.subheader("Average hourly profiles")
-    usage = result.hourly_average_usage.set_index("hour")
-    rates = result.hourly_average_rates.set_index("hour")
-
-    left, right = st.columns(2)
-    with left:
-        st.caption("Average hourly energy use across the included household sample")
-        st.line_chart(usage, height=330)
-    with right:
-        st.caption("Equal-household average hourly variable rates")
-        st.line_chart(rates, height=330)
 
 
 def provider_for_counties(
@@ -923,10 +733,6 @@ if analysis_mode == "All Michigan sample":
         result.trimmed_means["resistance"],
     )
 
-    st.caption(
-        "After excluding values below the 5th and above the 95th usage percentiles, gas, propane, and electric-resistance means use the same "
-        "gas-consumption-based household set. HPWH uses its HPWH-consumption set."
-    )
 
     with st.expander("Calculation assumptions and formulas", expanded=False):
         st.markdown(
@@ -946,13 +752,6 @@ if analysis_mode == "All Michigan sample":
             """
         )
 
-    show_charts = st.checkbox("Show hourly charts", value=False)
-    if show_charts:
-        render_statewide_charts(result)
-
-    show_details = st.checkbox("Show detailed household tables", value=False)
-    if show_details:
-        render_statewide_details(result, data)
 
 elif analysis_mode == "County / area scenario":
     applied = st.session_state["applied_region"]
@@ -1024,20 +823,6 @@ elif analysis_mode == "County / area scenario":
         result.resistance_summary,
     )
 
-    st.caption(
-        "The selected electricity and gas tariffs are applied to every sampled "
-        "household in the selected county or multi-county area. Holland pools "
-        "Ottawa and Allegan County households and applies Holland Board of Public "
-        "Works and SEMCO tariffs. Traverse City uses the separate 75-household "
-        "Grand Traverse sample and applies Traverse City Light & Power and DTE "
-        "Gas tariffs."
-    )
-
-    if applied["region"] == "Traverse City":
-        show_traverse_city_rate_tables(
-            data,
-            str(applied["electric_tariff"]),
-        )
 
     if len(result.households) < 10:
         st.warning(
@@ -1046,37 +831,6 @@ elif analysis_mode == "County / area scenario":
             "as representative of the full service territory."
         )
 
-    if st.checkbox("Show regional household table", value=False):
-        display = result.households.sort_values(
-            ["county", "bldg_id"],
-            key=lambda series: (
-                pd.to_numeric(series, errors="coerce")
-                if series.name == "bldg_id"
-                else series.astype(str)
-            ),
-            kind="stable",
-        ).reset_index(drop=True)
-        display.insert(0, "Area House No.", range(1, len(display) + 1))
-        st.dataframe(
-            display,
-            use_container_width=True,
-            hide_index=True,
-            height=620,
-        )
-        safe_name = (
-            applied["region"]
-            .lower()
-            .replace(" ", "_")
-            .replace("(", "")
-            .replace(")", "")
-            .replace("+", "and")
-        )
-        st.download_button(
-            "Download regional results as CSV",
-            display.to_csv(index=False).encode("utf-8"),
-            file_name=f"{safe_name}_scenario.csv",
-            mime="text/csv",
-        )
 
 else:
     applied = st.session_state["applied_space_heating"]
@@ -1196,11 +950,6 @@ else:
     )
     second_2.empty()
 
-    st.caption(
-        "Exclude top and bottom 5% by usage (5th/95th percentile cutoffs): Upgrade 4 is trimmed "
-        "by its electricity-use profile, while Upgrade 0 / propane are trimmed "
-        "by main natural-gas use; the cost difference uses the intersection."
-    )
 
     with st.expander("Space-heating assumptions and formulas", expanded=False):
         st.markdown(
@@ -1223,31 +972,4 @@ else:
             """
         )
 
-    show_traverse_city_rate_tables(
-        data,
-        str(applied["electric_tariff"]),
-    )
 
-    if st.checkbox(
-        "Show space-heating household table",
-        value=False,
-        key="show_space_household_table",
-    ):
-        display = result.households.sort_values(
-            "bldg_id",
-            key=lambda series: pd.to_numeric(series, errors="coerce"),
-            kind="stable",
-        ).reset_index(drop=True)
-        display.insert(0, "Area House No.", range(1, len(display) + 1))
-        st.dataframe(
-            display,
-            use_container_width=True,
-            hide_index=True,
-            height=620,
-        )
-        st.download_button(
-            "Download space-heating results as CSV",
-            display.to_csv(index=False).encode("utf-8"),
-            file_name="traverse_city_space_heating_scenario.csv",
-            mime="text/csv",
-        )
