@@ -79,12 +79,12 @@ REGION_CONFIGS = {
     },
     "Holland": {
         "counties": ("Ottawa County", "Allegan County"),
-        "electric_provider": "Holland board of public works",
+        "electric_provider": "Holland Board of Public works",
         "gas_provider": "SEMCO Energy Gas Company",
     },
     "Traverse City": {
         "counties": ("Grand Traverse County",),
-        "electric_provider": "Traverse city light & power",
+        "electric_provider": "Traverse city Light & Power",
         "gas_provider": "DTE Gas Company",
         "usage_sample": "grand_traverse_dedicated",
     },
@@ -94,7 +94,7 @@ REGION_OPTIONS = list(REGION_CONFIGS)
 SPACE_HEATING_REGION_CONFIGS = {
     "Traverse City": {
         "counties": ("Grand Traverse County",),
-        "electric_provider": "Traverse city light & power",
+        "electric_provider": "Traverse city Light & Power",
         "gas_provider": "DTE Gas Company",
     },
 }
@@ -144,7 +144,7 @@ def traverse_city_hourly_rate_table(
     data,
     tariff: str,
 ) -> pd.DataFrame:
-    provider = "Traverse city light & power"
+    provider = "Traverse city Light & Power"
 
     rates = data.electricity_rates.loc[
         (data.electricity_rates["elec_provd"].astype(str) == provider)
