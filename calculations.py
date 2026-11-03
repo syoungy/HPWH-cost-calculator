@@ -15,8 +15,9 @@ from data_loading import (
 )
 
 
-PERIOD_MONTH = {"1": 1, "8": 8}
-SUPPORTED_PERIODS = {"1", "8", "year"}
+BILLING_YEAR = 2026
+PERIOD_MONTH = {str(m): m for m in range(1, 13)}
+SUPPORTED_PERIODS = set(PERIOD_MONTH) | {"year"}
 
 GAS_WH_EFFICIENCY = 0.62
 PROPANE_WH_EFFICIENCY = 0.62
@@ -37,7 +38,7 @@ class StatewideResult:
     propane_summary: dict[str, float | int]
     resistance_summary: dict[str, float | int]
     hpwh_minus_gas_summary: dict[str, float | int]
-    interval_95: dict[str, dict[str, float | int]]
+    trimmed_means: dict[str, dict[str, float | int]]
     hourly_average_rates: pd.DataFrame
     hourly_average_usage: pd.DataFrame
     missing_electric: pd.DataFrame
@@ -70,7 +71,7 @@ class SpaceHeatingResult:
     gas_summary: dict[str, float | int]
     propane_summary: dict[str, float | int]
     heat_pump_minus_gas_summary: dict[str, float | int]
-    interval_95: dict[str, dict[str, float | int]]
+    trimmed_means: dict[str, dict[str, float | int]]
     geography_label: str
     sample_counties: tuple[str, ...]
     electric_provider: str
@@ -145,42 +146,43 @@ def _period_multiplier(year: int, period: str) -> float:
     )
 
 
-def _usage_profile(
-    usage: pd.DataFrame,
-    period: str,
-    prefix: str,
-) -> pd.DataFrame:
-    selected = usage.loc[
-        usage["season"].astype(str) == str(period),
-        ["bldg_id", *USAGE_HOUR_COLUMNS],
-    ].copy()
-    selected["bldg_id"] = selected["bldg_id"].astype(str)
-    selected = selected.rename(
-        columns={column: f"{prefix}_{hour:02d}" for hour, column in enumerate(USAGE_HOUR_COLUMNS)}
-    )
-    return selected
+def _hours(period):
+    return range(288 if period == "year" else 24)
 
 
-def _space_component_profile(
-    usage: pd.DataFrame,
-    period: str,
-    component: str,
-    prefix: str,
-) -> pd.DataFrame:
-    """Select one named component row per house for a space-heating period."""
-    selected = usage.loc[
-        (usage["season"].astype(str) == str(period))
-        & (usage["component"].astype(str) == str(component)),
-        ["bldg_id", *USAGE_HOUR_COLUMNS],
-    ].copy()
-    selected["bldg_id"] = selected["bldg_id"].astype(str)
-    selected = selected.rename(
-        columns={
-            column: f"{prefix}_{hour:02d}"
-            for hour, column in enumerate(USAGE_HOUR_COLUMNS)
-        }
-    )
-    return selected
+def _daily_matrix(values, period):
+    """24-hour display/trim profile; NEVER used for annual electricity costing."""
+    values = np.asarray(values, dtype=float)
+    if period != "year":
+        return values
+    days = np.array([calendar.monthrange(BILLING_YEAR, m)[1] for m in range(1, 13)])
+    return np.average(values.reshape(-1, 12, 24), axis=1, weights=days)
+
+
+def _usage_profile(usage, period, prefix):
+    if period == "year":
+        selected = usage.sort_values(["bldg_id", "month"])
+        ids = selected.bldg_id.drop_duplicates().astype(str).to_numpy()
+        values = selected[USAGE_HOUR_COLUMNS].to_numpy(dtype=float).reshape(len(ids), 288)
+    else:
+        selected = usage.loc[usage.month == int(period)].sort_values("bldg_id")
+        ids = selected.bldg_id.astype(str).to_numpy()
+        values = selected[USAGE_HOUR_COLUMNS].to_numpy(dtype=float)
+    result = pd.DataFrame(values, columns=[f"{prefix}_{h:02d}" for h in _hours(period)])
+    result.insert(0, "bldg_id", ids)
+    return result
+
+
+def daily_usage_profile(usage, period="year"):
+    flat = _usage_profile(usage, period, "usage")
+    result = pd.DataFrame(_daily_matrix(flat.drop(columns="bldg_id"), period), columns=USAGE_HOUR_COLUMNS)
+    result.insert(0, "bldg_id", flat.bldg_id.to_numpy())
+    return result
+
+
+def _space_component_profile(usage, period, component, prefix):
+    return _usage_profile(usage.loc[usage.component == component], period, prefix)
+
 
 def _houses_with_profiles(data: CalculatorData, period: str) -> pd.DataFrame:
     electric = _usage_profile(data.electricity_usage, period, "hpwh")
@@ -254,11 +256,11 @@ def _latest_complete_electric_scenarios(
         if period in PERIOD_MONTH:
             month = PERIOD_MONTH[period]
             rate_vector = chosen_group.iloc[0][RATE_HOUR_COLUMNS].astype(float).to_numpy()
-            days = calendar.monthrange(chosen_year, month)[1]
+            days = calendar.monthrange(BILLING_YEAR, month)[1]
             cost_factor = days * rate_vector
             display_rate = rate_vector
         else:
-            cost_factor = np.zeros(24, dtype=float)
+            monthly_factors = []
             weighted_rate = np.zeros(24, dtype=float)
             annual_days = 0
             for month in range(1, 13):
@@ -267,11 +269,12 @@ def _latest_complete_electric_scenarios(
                     raise ValueError(
                         f"Incomplete annual tariff: {provider} / {tariff} / {chosen_year}."
                     )
-                days = calendar.monthrange(chosen_year, month)[1]
+                days = calendar.monthrange(BILLING_YEAR, month)[1]
                 rate_vector = row.iloc[0][RATE_HOUR_COLUMNS].astype(float).to_numpy()
-                cost_factor += days * rate_vector / 12.0
+                monthly_factors.append(days * rate_vector / 12.0)
                 weighted_rate += days * rate_vector
                 annual_days += days
+            cost_factor = np.concatenate(monthly_factors)
             display_rate = weighted_rate / annual_days
 
         record: dict[str, object] = {
@@ -279,11 +282,12 @@ def _latest_complete_electric_scenarios(
             "electric_tariff": str(tariff),
             "electric_year": int(chosen_year),
         }
-        record.update({f"factor_{hour:02d}": float(cost_factor[hour]) for hour in range(24)})
+        record.update({f"factor_{hour:02d}": float(cost_factor[hour]) for hour in _hours(period)})
         record.update({f"rate_{hour:02d}": float(display_rate[hour]) for hour in range(24)})
         records.append(record)
 
-    return pd.DataFrame(records)
+    return pd.DataFrame(records, columns=["electric_provider", "electric_tariff", "electric_year",
+        *[f"factor_{h:02d}" for h in _hours(period)], *[f"rate_{h:02d}" for h in range(24)]])
 
 
 def _latest_gas_scenarios(
@@ -298,16 +302,19 @@ def _latest_gas_scenarios(
             chosen = chosen.sort_values("source_order", kind="stable")
         row = chosen.iloc[0]
         rate_vector = row[RATE_HOUR_COLUMNS].astype(float).to_numpy()
-        multiplier = _period_multiplier(year, period)
+        multiplier = _period_multiplier(BILLING_YEAR, period)
         record: dict[str, object] = {
             "gas_provider": str(provider),
             "gas_tariff": str(tariff),
             "gas_year": year,
         }
-        record.update({f"factor_{hour:02d}": float(multiplier * rate_vector[hour]) for hour in range(24)})
+        gas_factor = (np.concatenate([calendar.monthrange(BILLING_YEAR, m)[1] * rate_vector / 12.0
+                                     for m in range(1, 13)]) if period == "year" else multiplier * rate_vector)
+        record.update({f"factor_{hour:02d}": float(gas_factor[hour]) for hour in _hours(period)})
         record.update({f"rate_{hour:02d}": float(rate_vector[hour]) for hour in range(24)})
         records.append(record)
-    return pd.DataFrame(records)
+    return pd.DataFrame(records, columns=["gas_provider", "gas_tariff", "gas_year",
+        *[f"factor_{h:02d}" for h in _hours(period)], *[f"rate_{h:02d}" for h in range(24)]])
 
 
 def available_electric_tariffs(
@@ -344,7 +351,7 @@ def _technology_tariff_costs(
     missing: list[dict[str, object]] = []
     house_rate_vectors: list[np.ndarray] = []
 
-    factor_columns = [f"factor_{hour:02d}" for hour in range(24)]
+    factor_columns = [c for c in scenarios.columns if c.startswith("factor_")] 
     rate_columns = [f"rate_{hour:02d}" for hour in range(24)]
 
     for provider, provider_houses in houses.groupby("elec_provd", sort=False):
@@ -398,9 +405,9 @@ def _gas_household_costs(
     records: list[pd.DataFrame] = []
     missing: list[dict[str, object]] = []
     house_rate_vectors: list[np.ndarray] = []
-    factor_columns = [f"factor_{hour:02d}" for hour in range(24)]
+    factor_columns = [c for c in scenarios.columns if c.startswith("factor_")] 
     rate_columns = [f"rate_{hour:02d}" for hour in range(24)]
-    gas_columns = [f"gas_{hour:02d}" for hour in range(24)]
+    gas_columns = [f"gas_{hour:02d}" for hour in range(len(factor_columns))]
 
     for provider, provider_houses in houses.groupby("gas_provd", sort=False):
         provider_scenarios = scenarios[
@@ -444,12 +451,12 @@ def _gas_household_costs(
     return cost_frame, missing_frame, rate_frame
 
 
-def _central_95_ids(frame: pd.DataFrame, usage_column: str) -> set[str]:
+def _central_90_ids(frame: pd.DataFrame, usage_column: str) -> set[str]:
     clean = frame[["bldg_id", usage_column]].dropna().copy()
     if clean.empty:
         return set()
-    lower = float(clean[usage_column].quantile(0.025))
-    upper = float(clean[usage_column].quantile(0.975))
+    lower = float(clean[usage_column].quantile(0.05))
+    upper = float(clean[usage_column].quantile(0.95))
     return set(
         clean.loc[
             clean[usage_column].between(lower, upper, inclusive="both"),
@@ -478,15 +485,15 @@ def calculate_statewide(
 ) -> StatewideResult:
     if period not in SUPPORTED_PERIODS:
         raise ValueError(f"Unsupported period: {period}")
-    if propane_price_per_gallon < 0:
+    if not np.isfinite(propane_price_per_gallon) or propane_price_per_gallon < 0:
         raise ValueError("Propane price cannot be negative.")
 
     houses = _houses_with_profiles(data, period)
-    hpwh_columns = [f"hpwh_{hour:02d}" for hour in range(24)]
-    gas_columns = [f"gas_{hour:02d}" for hour in range(24)]
+    hpwh_columns = [f"hpwh_{hour:02d}" for hour in _hours(period)]
+    gas_columns = [f"gas_{hour:02d}" for hour in _hours(period)]
 
-    houses["hpwh_daily_use_kwh"] = houses[hpwh_columns].sum(axis=1)
-    houses["gas_input_daily_use_kwh"] = houses[gas_columns].sum(axis=1)
+    houses["hpwh_daily_use_kwh"] = _daily_matrix(houses[hpwh_columns], period).sum(axis=1)
+    houses["gas_input_daily_use_kwh"] = _daily_matrix(houses[gas_columns], period).sum(axis=1)
     houses["resistance_daily_use_kwh"] = (
         houses["gas_input_daily_use_kwh"]
         * GAS_WH_EFFICIENCY
@@ -511,12 +518,11 @@ def calculate_statewide(
     )
 
     resistance_houses = houses.copy()
-    resistance_columns = [f"resistance_{hour:02d}" for hour in range(24)]
+    resistance_columns = [f"resistance_{hour:02d}" for hour in _hours(period)]
     resistance_ratio = GAS_WH_EFFICIENCY / RESISTANCE_WH_EFFICIENCY
-    for hour, column in enumerate(gas_columns):
-        resistance_houses[resistance_columns[hour]] = (
-            resistance_houses[column].astype(float) * resistance_ratio
-        )
+    resistance_houses = pd.concat([resistance_houses, pd.DataFrame(
+        houses[gas_columns].to_numpy(dtype=float) * resistance_ratio,
+        columns=resistance_columns, index=houses.index)], axis=1)
 
     resistance_costs, _, resistance_rate_rows = _technology_tariff_costs(
         resistance_houses,
@@ -536,7 +542,7 @@ def calculate_statewide(
         resistance_costs, "resistance_monthly_cost", "resistance"
     )
 
-    propane_year = 2026
+    propane_year = BILLING_YEAR
     propane_multiplier = _period_multiplier(propane_year, period)
     propane_frame = houses[
         ["bldg_id", "in.county_name", "propane_input_daily_kwh"]
@@ -635,21 +641,21 @@ def calculate_statewide(
         "n": int(len(paired)),
     }
 
-    hpwh_95_ids = _central_95_ids(base, "hpwh_daily_use_kwh")
-    gas_95_ids = _central_95_ids(base, "gas_input_daily_use_kwh")
-    paired_95_ids = hpwh_95_ids & gas_95_ids
+    hpwh_trimmed_ids = _central_90_ids(base, "hpwh_daily_use_kwh")
+    gas_trimmed_ids = _central_90_ids(base, "gas_input_daily_use_kwh")
+    paired_trimmed_ids = hpwh_trimmed_ids & gas_trimmed_ids
 
-    interval_95 = {
-        "hpwh": _interval_mean(hpwh_house, hpwh_95_ids, "hpwh_average"),
-        "gas": _interval_mean(gas_costs, gas_95_ids, "gas_monthly_cost"),
+    trimmed_means = {
+        "hpwh": _interval_mean(hpwh_house, hpwh_trimmed_ids, "hpwh_average"),
+        "gas": _interval_mean(gas_costs, gas_trimmed_ids, "gas_monthly_cost"),
         "propane": _interval_mean(
-            propane_frame, gas_95_ids, "propane_monthly_cost"
+            propane_frame, gas_trimmed_ids, "propane_monthly_cost"
         ),
         "resistance": _interval_mean(
-            resistance_house, gas_95_ids, "resistance_average"
+            resistance_house, gas_trimmed_ids, "resistance_average"
         ),
         "hpwh_minus_gas": _interval_mean(
-            paired, paired_95_ids, "hpwh_minus_gas_average"
+            paired, paired_trimmed_ids, "hpwh_minus_gas_average"
         ),
     }
 
@@ -676,11 +682,9 @@ def calculate_statewide(
     hourly_average_usage = pd.DataFrame(
         {
             "hour": range(24),
-            "hpwh_kwh": houses[hpwh_columns].mean(axis=0).to_numpy(),
-            "gas_input_kwh": houses[gas_columns].mean(axis=0).to_numpy(),
-            "resistance_kwh": resistance_houses[resistance_columns]
-            .mean(axis=0)
-            .to_numpy(),
+            "hpwh_kwh": _daily_matrix(houses[hpwh_columns], period).mean(axis=0),
+            "gas_input_kwh": _daily_matrix(houses[gas_columns], period).mean(axis=0),
+            "resistance_kwh": _daily_matrix(resistance_houses[resistance_columns], period).mean(axis=0),
         }
     )
 
@@ -695,7 +699,7 @@ def calculate_statewide(
         propane_summary=propane_summary,
         resistance_summary=resistance_summary,
         hpwh_minus_gas_summary=hpwh_minus_gas_summary,
-        interval_95=interval_95,
+        trimmed_means=trimmed_means,
         hourly_average_rates=hourly_average_rates,
         hourly_average_usage=hourly_average_usage,
         missing_electric=missing_electric,
@@ -754,7 +758,7 @@ def calculate_county_scenario(
 ) -> CountyScenarioResult:
     if period not in SUPPORTED_PERIODS:
         raise ValueError(f"Unsupported period: {period}")
-    if propane_price_per_gallon < 0:
+    if not np.isfinite(propane_price_per_gallon) or propane_price_per_gallon < 0:
         raise ValueError("Propane price cannot be negative.")
 
     sample_counties = (county,) if isinstance(county, str) else tuple(county)
@@ -806,9 +810,9 @@ def calculate_county_scenario(
         data, gas_provider, gas_tariff, period
     )
 
-    hpwh_columns = [f"hpwh_{hour:02d}" for hour in range(24)]
-    gas_columns = [f"gas_{hour:02d}" for hour in range(24)]
-    factor_columns = [f"factor_{hour:02d}" for hour in range(24)]
+    hpwh_columns = [f"hpwh_{hour:02d}" for hour in _hours(period)]
+    gas_columns = [f"gas_{hour:02d}" for hour in _hours(period)]
+    factor_columns = [f"factor_{hour:02d}" for hour in _hours(period)]
 
     hpwh_matrix = houses[hpwh_columns].astype(float).to_numpy()
     gas_matrix = houses[gas_columns].astype(float).to_numpy()
@@ -821,9 +825,9 @@ def calculate_county_scenario(
     resistance_cost = resistance_matrix @ electric_factor
     gas_cost = gas_matrix @ gas_factor
 
-    propane_daily_input = gas_matrix.sum(axis=1) * GAS_WH_EFFICIENCY / PROPANE_WH_EFFICIENCY
+    propane_daily_input = _daily_matrix(gas_matrix, period).sum(axis=1) * GAS_WH_EFFICIENCY / PROPANE_WH_EFFICIENCY
     propane_daily_gallons = propane_daily_input / PROPANE_KWH_PER_GALLON
-    propane_multiplier = _period_multiplier(2026, period)
+    propane_multiplier = _period_multiplier(BILLING_YEAR, period)
     propane_cost = (
         propane_daily_gallons
         * propane_multiplier
@@ -841,9 +845,9 @@ def calculate_county_scenario(
             "gas_provider": str(gas_provider),
             "gas_tariff": str(gas_tariff),
             "gas_year": int(gas_scenario["gas_year"]),
-            "hpwh_daily_use_kwh": hpwh_matrix.sum(axis=1),
-            "gas_input_daily_use_kwh": gas_matrix.sum(axis=1),
-            "resistance_daily_use_kwh": resistance_matrix.sum(axis=1),
+            "hpwh_daily_use_kwh": _daily_matrix(hpwh_matrix, period).sum(axis=1),
+            "gas_input_daily_use_kwh": _daily_matrix(gas_matrix, period).sum(axis=1),
+            "resistance_daily_use_kwh": _daily_matrix(resistance_matrix, period).sum(axis=1),
             "propane_daily_gallons": propane_daily_gallons,
             "hpwh_monthly_cost": hpwh_cost,
             "gas_monthly_cost": gas_cost,
@@ -904,7 +908,7 @@ def calculate_space_heating_scenario(
     """
     if period not in SUPPORTED_PERIODS:
         raise ValueError(f"Unsupported period: {period}")
-    if propane_price_per_gallon < 0:
+    if not np.isfinite(propane_price_per_gallon) or propane_price_per_gallon < 0:
         raise ValueError("Propane price cannot be negative.")
 
     sample_counties = (county,) if isinstance(county, str) else tuple(county)
@@ -993,12 +997,12 @@ def calculate_space_heating_scenario(
         period,
     )
 
-    factor_columns = [f"factor_{hour:02d}" for hour in range(24)]
+    factor_columns = [f"factor_{hour:02d}" for hour in _hours(period)]
     electric_factor = electric_scenario[factor_columns].astype(float).to_numpy()
     gas_factor = gas_scenario[factor_columns].astype(float).to_numpy()
 
     def matrix(prefix: str) -> np.ndarray:
-        columns = [f"{prefix}_{hour:02d}" for hour in range(24)]
+        columns = [f"{prefix}_{hour:02d}" for hour in _hours(period)]
         return houses[columns].astype(float).to_numpy()
 
     hp_main_matrix = matrix("hp_main")
@@ -1030,9 +1034,9 @@ def calculate_space_heating_scenario(
     gas_cost = gas_main_cost + gas_blower_cost
 
     # Propane keeps the Upgrade-0 main heating input and blower/fan electricity.
-    propane_daily_gallons = gas_main_matrix.sum(axis=1) / PROPANE_KWH_PER_GALLON
+    propane_daily_gallons = _daily_matrix(gas_main_matrix, period).sum(axis=1) / PROPANE_KWH_PER_GALLON
     propane_multiplier = _period_multiplier(
-        int(electric_scenario["electric_year"]),
+        BILLING_YEAR,
         period,
     )
     propane_fuel_cost = (
@@ -1042,11 +1046,11 @@ def calculate_space_heating_scenario(
     )
     propane_cost = propane_fuel_cost + gas_blower_cost
 
-    hp_main_daily = hp_main_matrix.sum(axis=1)
-    hp_main_fan_daily = hp_main_fan_matrix.sum(axis=1)
-    hp_aux_electric_daily = hp_aux_electric_matrix.sum(axis=1)
-    hp_aux_fan_daily = hp_aux_fan_matrix.sum(axis=1)
-    hp_aux_gas_daily = hp_aux_gas_matrix.sum(axis=1)
+    hp_main_daily = _daily_matrix(hp_main_matrix, period).sum(axis=1)
+    hp_main_fan_daily = _daily_matrix(hp_main_fan_matrix, period).sum(axis=1)
+    hp_aux_electric_daily = _daily_matrix(hp_aux_electric_matrix, period).sum(axis=1)
+    hp_aux_fan_daily = _daily_matrix(hp_aux_fan_matrix, period).sum(axis=1)
+    hp_aux_gas_daily = _daily_matrix(hp_aux_gas_matrix, period).sum(axis=1)
     heat_pump_electric_daily = (
         hp_main_daily
         + hp_main_fan_daily
@@ -1054,8 +1058,8 @@ def calculate_space_heating_scenario(
         + hp_aux_fan_daily
     )
 
-    gas_main_daily = gas_main_matrix.sum(axis=1)
-    gas_blower_daily = gas_blower_matrix.sum(axis=1)
+    gas_main_daily = _daily_matrix(gas_main_matrix, period).sum(axis=1)
+    gas_blower_daily = _daily_matrix(gas_blower_matrix, period).sum(axis=1)
 
     result = pd.DataFrame(
         {
@@ -1118,37 +1122,37 @@ def calculate_space_heating_scenario(
         result["propane_monthly_cost"] - result["gas_monthly_cost"]
     )
 
-    # Preserve the v5.3 central-95% trimming basis:
+    # Trim below the 5th and above the 95th usage percentile:
     # Upgrade 4 -> total electricity profile; Upgrade 0 / propane -> main gas.
-    heat_pump_95_ids = _central_95_ids(
+    heat_pump_trimmed_ids = _central_90_ids(
         result,
         "heat_pump_electric_daily_use_kwh",
     )
-    gas_95_ids = _central_95_ids(
+    gas_trimmed_ids = _central_90_ids(
         result,
         "gas_main_daily_use_kwh",
     )
-    paired_95_ids = heat_pump_95_ids & gas_95_ids
+    paired_trimmed_ids = heat_pump_trimmed_ids & gas_trimmed_ids
 
-    interval_95 = {
+    trimmed_means = {
         "heat_pump": _interval_mean(
             result,
-            heat_pump_95_ids,
+            heat_pump_trimmed_ids,
             "heat_pump_monthly_cost",
         ),
         "gas": _interval_mean(
             result,
-            gas_95_ids,
+            gas_trimmed_ids,
             "gas_monthly_cost",
         ),
         "propane": _interval_mean(
             result,
-            gas_95_ids,
+            gas_trimmed_ids,
             "propane_monthly_cost",
         ),
         "heat_pump_minus_gas": _interval_mean(
             result,
-            paired_95_ids,
+            paired_trimmed_ids,
             "heat_pump_minus_gas",
         ),
     }
@@ -1159,7 +1163,7 @@ def calculate_space_heating_scenario(
         gas_summary=_summary(result["gas_monthly_cost"]),
         propane_summary=_summary(result["propane_monthly_cost"]),
         heat_pump_minus_gas_summary=_summary(result["heat_pump_minus_gas"]),
-        interval_95=interval_95,
+        trimmed_means=trimmed_means,
         geography_label=str(label),
         sample_counties=sample_counties,
         electric_provider=str(electric_provider),
