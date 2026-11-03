@@ -212,7 +212,7 @@ def show_traverse_city_rate_tables(
         "#### Traverse City Light & Power — monthly hourly rate tables"
     )
 
-    for tariff in ["Phase In", "Phase Out"]:
+    for tariff in ["Eco Champion Phase-In", "Eco Champion Non-Phase-In"]:
         selected_label = (
             " — Selected for this calculation"
             if tariff == str(selected_tariff)
