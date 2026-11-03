@@ -1,3 +1,6 @@
+# ============================================================================
+# 0. Imports
+
 from __future__ import annotations
 
 import calendar
@@ -14,6 +17,8 @@ from data_loading import (
     USAGE_HOUR_COLUMNS,
 )
 
+# ============================================================================
+# 1. Records, notes and assumptions (on Web app) 
 
 BILLING_YEAR = 2026
 PERIOD_MONTH = {str(m): m for m in range(1, 13)}
@@ -25,6 +30,9 @@ RESISTANCE_WH_EFFICIENCY = 0.95
 PROPANE_KWH_PER_GALLON = 91_452.0 / 3_412.0
 DEFAULT_PROPANE_PRICE_PER_GALLON = 2.370
 
+
+# ============================================================================
+# 2. Result -> how they return to the web app (on Web app) 
 
 @dataclass(frozen=True)
 class StatewideResult:
@@ -82,6 +90,9 @@ class SpaceHeatingResult:
     gas_year: int
 
 
+# ============================================================================
+# 3. Statistics: household #, tariff, prices etc. (on Web app) 
+
 def _summary(values: pd.Series | np.ndarray) -> dict[str, float | int]:
     clean = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
     if clean.empty:
@@ -137,6 +148,9 @@ def _electric_summary(
     }
 
 
+# ============================================================================
+# 4. Period selection and consumption profile prep
+
 def _period_multiplier(year: int, period: str) -> float:
     if period in PERIOD_MONTH:
         return float(calendar.monthrange(year, PERIOD_MONTH[period])[1])
@@ -184,6 +198,9 @@ def _space_component_profile(usage, period, component, prefix):
     return _usage_profile(usage.loc[usage.component == component], period, prefix)
 
 
+# ============================================================================
+# 5. Join household consumption profiles and Mapping provider (Household ID - County - elec/gas providers of each county)
+
 def _houses_with_profiles(data: CalculatorData, period: str) -> pd.DataFrame:
     electric = _usage_profile(data.electricity_usage, period, "hpwh")
     gas = _usage_profile(data.gas_usage, period, "gas")
@@ -214,11 +231,15 @@ def _dedicated_houses_with_profiles(
     return houses
 
 
+# ============================================================================
+# 6. Select applicable tariffs and get cost factors
+
+
 def _latest_complete_electric_scenarios(
     rates: pd.DataFrame,
     period: str,
 ) -> pd.DataFrame:
-    """Create one reusable 24-hour cost vector per provider/tariff."""
+    """Prepare 24 monthly or 288 annual-average cost factors per provider/tariff."""
     records: list[dict[str, object]] = []
 
     for (provider, tariff), group in rates.groupby(
@@ -340,6 +361,9 @@ def available_gas_tariffs(data: CalculatorData, provider: str) -> list[str]:
     )
 
 
+# ============================================================================
+# 7. Calculate electricity and gas costs by each household (ID)
+
 def _technology_tariff_costs(
     houses: pd.DataFrame,
     scenarios: pd.DataFrame,
@@ -425,7 +449,7 @@ def _gas_household_costs(
                 )
             continue
 
-        # Statewide logic retains one latest mapped gas tariff per provider.
+        # Use one gas tariff per provider: latest year, then tariff-name sort order.
         scenario = provider_scenarios.sort_values(
             ["gas_year", "gas_tariff"], kind="stable"
         ).iloc[-1]
@@ -449,6 +473,10 @@ def _gas_household_costs(
     missing_frame = pd.DataFrame(missing)
     rate_frame = pd.DataFrame(house_rate_vectors, columns=[f"hour_{hour:02d}" for hour in range(24)])
     return cost_frame, missing_frame, rate_frame
+
+
+# ============================================================================
+# 8. Excluding top5%, bottom 5% (b/c there were a few extereme cases) and cost means 
 
 
 def _central_90_ids(frame: pd.DataFrame, usage_column: str) -> set[str]:
@@ -478,16 +506,21 @@ def _interval_mean(
     }
 
 
+# ============================================================================
+# 9. Michigan water heating cost (153 sample) -> calculate, compare, summarize
+
 def calculate_statewide(
     data: CalculatorData,
     period: str,
     propane_price_per_gallon: float = DEFAULT_PROPANE_PRICE_PER_GALLON,
 ) -> StatewideResult:
+    # --- 9.1 Validate user inputs ---
     if period not in SUPPORTED_PERIODS:
         raise ValueError(f"Unsupported period: {period}")
     if not np.isfinite(propane_price_per_gallon) or propane_price_per_gallon < 0:
         raise ValueError("Propane price cannot be negative.")
 
+    # --- 9.2 Assemble household profiles and derive comparison energy use ---
     houses = _houses_with_profiles(data, period)
     hpwh_columns = [f"hpwh_{hour:02d}" for hour in _hours(period)]
     gas_columns = [f"gas_{hour:02d}" for hour in _hours(period)]
@@ -505,6 +538,7 @@ def calculate_statewide(
         / PROPANE_WH_EFFICIENCY
     )
 
+    # --- 9.3 Prepare tariffs and calculate costs for each technology ---
     electric_scenarios = _latest_complete_electric_scenarios(
         data.electricity_rates, period
     )
@@ -559,6 +593,7 @@ def calculate_statewide(
         * float(propane_price_per_gallon)
     )
 
+    # --- 9.4 Combine technology costs and compare the same households ---
     base = houses[
         [
             "bldg_id",
@@ -630,6 +665,7 @@ def calculate_statewide(
         paired["propane_monthly_cost"] - paired["gas_monthly_cost"]
     )
 
+    # --- 9.5 Summarize full-sample costs and usage-trimmed means ---
     hpwh_summary = _electric_summary(hpwh_house, "hpwh")
     resistance_summary = _electric_summary(resistance_house, "resistance")
     gas_summary = _summary(gas_costs["gas_monthly_cost"])
@@ -659,8 +695,9 @@ def calculate_statewide(
         ),
     }
 
-    # Equal-house weighting for rate charts. The technology shares the same
-    # electricity tariff set, so HPWH and resistance rate profiles are equal.
+    # --- 9.6 Prepare chart data and return the results ---
+    # Weight households equally in the rate charts. HPWH and resistance use
+    # the same electricity tariff set, so their rate profiles are identical.
     electric_rate_average = (
         hpwh_rate_rows.mean(axis=0).to_numpy()
         if not hpwh_rate_rows.empty
@@ -707,6 +744,9 @@ def calculate_statewide(
     )
 
 
+# ============================================================================
+# 10. ***Retrieve one selected tariff for regional comparisons*** (additional)
+
 def _selected_electric_scenario(
     data: CalculatorData,
     provider: str,
@@ -743,6 +783,9 @@ def _selected_gas_scenario(
         )
     return selected.iloc[0]
 
+
+# ============================================================================
+# 11. ***Regional water heating -> apply selected tariffs to the sample*** (additional)
 
 def calculate_county_scenario(
     data: CalculatorData,
@@ -877,6 +920,9 @@ def calculate_county_scenario(
         usage_sample=str(usage_sample),
     )
 
+
+# ============================================================================
+# 12. ***Grand Traverse space heating: component costs and comparisons*** (additional)
 
 def calculate_space_heating_scenario(
     data: CalculatorData,
@@ -1033,7 +1079,8 @@ def calculate_space_heating_scenario(
     gas_blower_cost = gas_blower_matrix @ electric_factor
     gas_cost = gas_main_cost + gas_blower_cost
 
-    # Propane keeps the Upgrade-0 main heating input and blower/fan electricity.
+    # Propane assumes the same combustion efficiency as baseline gas and
+    # retains the baseline blower/fan electricity cost.
     propane_daily_gallons = _daily_matrix(gas_main_matrix, period).sum(axis=1) / PROPANE_KWH_PER_GALLON
     propane_multiplier = _period_multiplier(
         BILLING_YEAR,
@@ -1098,7 +1145,7 @@ def calculate_space_heating_scenario(
             "hp_aux_fan_pump_electricity_cost": hp_aux_fan_cost,
             "hp_aux_natural_gas_cost": hp_aux_gas_cost,
 
-            # Backward-compatible aggregate cost columns.
+            # Heat-pump totals: four electricity components plus auxiliary gas.
             "heat_pump_electricity_cost": heat_pump_electricity_cost,
             "heat_pump_gas_aux_cost": hp_aux_gas_cost,
             "heat_pump_monthly_cost": heat_pump_cost,
