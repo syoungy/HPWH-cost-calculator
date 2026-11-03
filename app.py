@@ -18,6 +18,8 @@ from calculations import (
     calculate_county_scenario,
     calculate_space_heating_scenario,
     calculate_statewide,
+    daily_usage_profile,
+    BILLING_YEAR,
 )
 from data_loading import (
     ELECTRICITY_RATE_FILE,
@@ -144,7 +146,7 @@ def traverse_city_hourly_rate_table(
     data,
     tariff: str,
 ) -> pd.DataFrame:
-    provider = "Traverse city Light & Power"
+    provider = "Traverse City Light & Power"
 
     rates = data.electricity_rates.loc[
         (data.electricity_rates["elec_provd"].astype(str) == provider)
@@ -388,7 +390,7 @@ def show_summary_card(
         interval_html = (
             '<div style="font-size:1.14rem;font-weight:750;'
             'margin-bottom:0.32rem;color:inherit;">'
-            f'Interval 95%: {money(float(interval["mean"]))} '
+            f'exclude top and bottom 5%: {money(float(interval["mean"]))} '
             '<span style="font-size:0.90rem;font-weight:600;color:inherit;">'
             f'({int(interval["n"])} households)'
             '</span>'
@@ -427,12 +429,8 @@ def add_house_number(frame: pd.DataFrame, data) -> pd.DataFrame:
 
 
 def annual_hourly_table(data, household_summary: pd.DataFrame) -> pd.DataFrame:
-    electric = data.electricity_usage[
-        data.electricity_usage["season"].astype(str) == "year"
-    ][["bldg_id", *USAGE_HOUR_COLUMNS]].copy()
-    gas = data.gas_usage[
-        data.gas_usage["season"].astype(str) == "year"
-    ][["bldg_id", *USAGE_HOUR_COLUMNS]].copy()
+    electric = daily_usage_profile(data.electricity_usage)
+    gas = daily_usage_profile(data.gas_usage)
     electric["bldg_id"] = electric["bldg_id"].astype(str)
     gas["bldg_id"] = gas["bldg_id"].astype(str)
 
@@ -494,7 +492,7 @@ def render_statewide_charts(result: StatewideResult) -> None:
 
     left, right = st.columns(2)
     with left:
-        st.caption("Average energy use across the 149-household sample")
+        st.caption("Average hourly energy use across the included household sample")
         st.line_chart(usage, height=330)
     with right:
         st.caption("Equal-household average hourly variable rates")
@@ -556,6 +554,8 @@ st.set_page_config(
 
 title_placeholder = st.empty()
 caption_placeholder = st.empty()
+st.caption("January and August: monthly costs. Annual average: sum of 12 monthly costs ÷ 12. "
+           "Uses all-day monthly consumption averages and weekday electricity tariffs.")
 
 # Applied settings are separate from the live widget values. Changing a widget
 # reruns only the light UI; the scenario changes after Calculate / Update.
@@ -673,7 +673,7 @@ with st.sidebar:
             st.stop()
 
         if not electric_tariffs or not gas_tariffs:
-            st.error("No complete tariff is available for the selected scenario.")
+            st.error(f"No complete tariff for this selection. Electricity: {electric_provider} ({len(electric_tariffs)} tariffs); gas: {gas_provider} ({len(gas_tariffs)} tariffs). Check provider names and monthly rate coverage.")
             st.stop()
 
         current_electric = st.session_state.get("region_electric_tariff_input")
@@ -784,7 +784,7 @@ with st.sidebar:
             st.stop()
 
         if not space_electric_tariffs or not space_gas_tariffs:
-            st.error("No complete tariff is available for the selected scenario.")
+            st.error(f"No complete tariff for this selection. Electricity: {space_electric_provider} ({len(space_electric_tariffs)} tariffs); gas: {space_gas_provider} ({len(space_gas_tariffs)} tariffs). Check provider names and monthly rate coverage.")
             st.stop()
 
         current_space_electric = st.session_state.get(
@@ -884,7 +884,7 @@ if analysis_mode == "All Michigan sample":
 
     st.subheader(f"Results — {PROFILE_LABELS[applied['period']]}")
     st.caption(
-        f"149 mapped households · Propane price: "
+        f"{len(data.provider_map)} mapped households · Propane price: "
         f"${float(applied['propane_price']):.3f}/gallon"
     )
 
@@ -893,19 +893,19 @@ if analysis_mode == "All Michigan sample":
         first_1,
         "HPWH monthly electricity cost",
         result.hpwh_summary,
-        result.interval_95["hpwh"],
+        result.trimmed_means["hpwh"],
     )
     show_summary_card(
         first_2,
         "Natural-gas WH monthly cost",
         result.gas_summary,
-        result.interval_95["gas"],
+        result.trimmed_means["gas"],
     )
     show_summary_card(
         first_3,
         "HPWH − Gas WH cost difference",
         result.hpwh_minus_gas_summary,
-        result.interval_95["hpwh_minus_gas"],
+        result.trimmed_means["hpwh_minus_gas"],
     )
 
     st.markdown("### Additional water-heater scenarios")
@@ -914,17 +914,17 @@ if analysis_mode == "All Michigan sample":
         second_1,
         "Propane WH monthly cost",
         result.propane_summary,
-        result.interval_95["propane"],
+        result.trimmed_means["propane"],
     )
     show_summary_card(
         second_2,
         "Electric resistance WH monthly cost",
         result.resistance_summary,
-        result.interval_95["resistance"],
+        result.trimmed_means["resistance"],
     )
 
     st.caption(
-        "Gas, propane, and electric-resistance Central 95% means use the same "
+        "After excluding values below the 5th and above the 95th usage percentiles, gas, propane, and electric-resistance means use the same "
         "gas-consumption-based household set. HPWH uses its HPWH-consumption set."
     )
 
@@ -938,8 +938,11 @@ if analysis_mode == "All Michigan sample":
 - Propane input = natural-gas input × `{GAS_WH_EFFICIENCY:.2f}/{PROPANE_WH_EFFICIENCY:.2f}`
 - Electric resistance use = natural-gas input × `{GAS_WH_EFFICIENCY:.2f}/{RESISTANCE_WH_EFFICIENCY:.2f}`
 - Electric resistance uses the same regional electricity tariffs as HPWH.
-- January/August use the selected average daily profile multiplied by calendar days.
-- Annual average applies the annual-average daily profile to all 12 monthly tariffs, totals the year, and divides by 12.
+- January/August use the selected month’s all-day average profile and that month’s tariff, multiplied by days in the billing calendar ({BILLING_YEAR}).
+- Weekday electricity tariffs are applied to every day, including weekends and holidays (an approximation).
+- Usage uses the supplied simulation-clock hours without an additional timezone shift; local tariff-hour alignment remains an assumption.
+- Gas uses the selected annual tariff snapshot in every month. Fixed charges and other charges absent from the rate workbook are excluded.
+- Annual average matches each month’s usage to that month’s tariff, sums the 12 monthly costs, and divides by 12. It is an average monthly cost, not an annual total.
             """
         )
 
@@ -1020,6 +1023,7 @@ elif analysis_mode == "County / area scenario":
         "Electric resistance WH monthly cost",
         result.resistance_summary,
     )
+
     st.caption(
         "The selected electricity and gas tariffs are applied to every sampled "
         "household in the selected county or multi-county area. Holland pools "
@@ -1152,7 +1156,7 @@ else:
         first_1,
         "Heat-pump space-heating monthly cost",
         result.heat_pump_summary,
-        result.interval_95["heat_pump"],
+        result.trimmed_means["heat_pump"],
         details=[
             ("(Main) HP space heating system", hp_main_mean),
             ("(Main_furnace) fan/pump with electricity", hp_main_fan_mean),
@@ -1165,7 +1169,7 @@ else:
         first_2,
         "Natural-gas space-heating monthly cost",
         result.gas_summary,
-        result.interval_95["gas"],
+        result.trimmed_means["gas"],
         details=[
             ("(Main) Natural gas heating system", gas_fuel_mean),
             ("(Main_furnace) Blower/fan with electricity", gas_fan_pump_mean),
@@ -1175,7 +1179,7 @@ else:
         first_3,
         "Heat pump − Gas cost difference",
         result.heat_pump_minus_gas_summary,
-        result.interval_95["heat_pump_minus_gas"],
+        result.trimmed_means["heat_pump_minus_gas"],
     )
 
     st.markdown("### Additional space-heating scenario")
@@ -1184,7 +1188,7 @@ else:
         second_1,
         "Propane space-heating monthly cost",
         result.propane_summary,
-        result.interval_95["propane"],
+        result.trimmed_means["propane"],
         details=[
             ("Propane fuel", propane_fuel_mean),
             ("Fan/pump electricity", propane_fan_pump_mean),
@@ -1193,7 +1197,7 @@ else:
     second_2.empty()
 
     st.caption(
-        "Central 95% keeps the original trimming basis: Upgrade 4 is trimmed "
+        "Exclude top and bottom 5% by usage (5th/95th percentile cutoffs): Upgrade 4 is trimmed "
         "by its electricity-use profile, while Upgrade 0 / propane are trimmed "
         "by main natural-gas use; the cost difference uses the intersection."
     )
@@ -1201,8 +1205,8 @@ else:
     with st.expander("Space-heating assumptions and formulas", expanded=False):
         st.markdown(
             f"""
-- Upgrade 4 profile: `Grand Traverse_Space heating_upgrade4_hourly_average_kwh.xlsx`
-- Upgrade 0 profile: `Grand Traverse_Space heating_upgrade0_hourly_average_kwh.xlsx`
+- Upgrade 4 profile: `GT_space_heating_scenario4_monthly_average_kwh.xlsx`
+- Upgrade 0 profile: `GT_space_heating_scenario0_monthly_average_kwh.xlsx`
 - Upgrade 4 components: (Main) HP space heating system, (Main_furnace) fan/pump with electricity, (Aux) auxiliary heating with electricity, (Aux_furnace) fan/pump with electricity, and (Aux) auxiliary heating with natural gas.
 - Upgrade 4 cost = four electricity-component costs + natural-gas auxiliary cost.
 - Upgrade 0 components: main natural-gas heating and blower/fan electricity.
@@ -1211,8 +1215,11 @@ else:
 - Propane assumes equivalent combustion efficiency, so propane input energy = baseline natural-gas input energy.
 - Propane gallons = natural-gas input kWh ÷ `{PROPANE_KWH_PER_GALLON:.3f} kWh/gallon`.
 - Propane price: `${float(applied['propane_price']):.3f}/gallon`.
-- January/August use the selected average daily profile multiplied by calendar days.
-- Annual average applies the annual-average daily profile to all 12 monthly tariffs, totals the year, and divides by 12.
+- January/August use the selected month’s all-day average profile and that month’s tariff, multiplied by days in the billing calendar ({BILLING_YEAR}).
+- Weekday electricity tariffs are applied to every day, including weekends and holidays (an approximation).
+- Usage uses the supplied simulation-clock hours without an additional timezone shift; local tariff-hour alignment remains an assumption.
+- Gas uses the selected annual tariff snapshot in every month. Fixed charges and other charges absent from the rate workbook are excluded.
+- Annual average matches each month’s usage to that month’s tariff, sums the 12 monthly costs, and divides by 12. It is an average monthly cost, not an annual total.
             """
         )
 
