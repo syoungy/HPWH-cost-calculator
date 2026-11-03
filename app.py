@@ -79,12 +79,12 @@ REGION_CONFIGS = {
     },
     "Holland": {
         "counties": ("Ottawa County", "Allegan County"),
-        "electric_provider": "Holland Board of Public works",
+        "electric_provider": "Holland Board of Public Works",
         "gas_provider": "SEMCO Energy Gas Company",
     },
     "Traverse City": {
         "counties": ("Grand Traverse County",),
-        "electric_provider": "Traverse city Light & Power",
+        "electric_provider": "Traverse City Light & Power",
         "gas_provider": "DTE Gas Company",
         "usage_sample": "grand_traverse_dedicated",
     },
@@ -94,7 +94,7 @@ REGION_OPTIONS = list(REGION_CONFIGS)
 SPACE_HEATING_REGION_CONFIGS = {
     "Traverse City": {
         "counties": ("Grand Traverse County",),
-        "electric_provider": "Traverse city Light & Power",
+        "electric_provider": "Traverse City Light & Power",
         "gas_provider": "DTE Gas Company",
     },
 }
@@ -1020,7 +1020,6 @@ elif analysis_mode == "County / area scenario":
         "Electric resistance WH monthly cost",
         result.resistance_summary,
     )
-
     st.caption(
         "The selected electricity and gas tariffs are applied to every sampled "
         "household in the selected county or multi-county area. Holland pools "
